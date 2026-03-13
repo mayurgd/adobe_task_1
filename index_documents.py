@@ -8,9 +8,9 @@ Two-stage retrieval strategy:
              - text chunks   : heading + paragraph text
              - table chunks  : heading + caption + table converted to plain text
              - image chunks  : heading + caption
-  Stage 2 — linked asset fetch using stored metadata
-             - tables : full HTML stored in metadata["table_html"]
-             - images : file path stored in metadata["img_path"]
+  Stage 2 — linked asset fetch using source_idx
+             - tables : source_idx → content_list[source_idx]["table_body"] (full HTML)
+             - images : source_idx → content_list[source_idx]["img_path"]
 
 Usage:
     python index_documents.py
@@ -85,8 +85,8 @@ def build_chunks(content: list) -> list[dict]:
 
         # type-specific payload stored as metadata
         text        : paragraph text (text chunks)
-        table_html  : raw HTML (table chunks)
-        img_path    : relative image path (image chunks)
+        source_idx  : index into original content_list (table / image chunks)
+        img_path    : relative image path (image chunks, convenience copy)
         caption     : caption string (table / image chunks)
     """
     chunks = []
@@ -113,8 +113,7 @@ def build_chunks(content: list) -> list[dict]:
                 "heading": current_heading,
                 "text": body,
                 "pages": sorted(current_pages),
-                # unused fields for this type — kept uniform
-                "table_html": "",
+                "source_idx": -1,
                 "img_path": "",
                 "caption": "",
             }
@@ -122,7 +121,7 @@ def build_chunks(content: list) -> list[dict]:
         current_text_parts = []
         current_pages = set()
 
-    for item in content:
+    for source_idx, item in enumerate(content):
         item_type = item.get("type")
 
         # ── text / heading ─────────────────────────────────────────────────
@@ -157,7 +156,7 @@ def build_chunks(content: list) -> list[dict]:
                     "type": "table",
                     "heading": current_heading,
                     "text": table_text,
-                    "table_html": html,
+                    "source_idx": source_idx,  # fetch full HTML from content_list at query time
                     "img_path": "",
                     "caption": caption,
                     "pages": [item.get("page_idx", 0)],
@@ -179,8 +178,8 @@ def build_chunks(content: list) -> list[dict]:
                     "type": "image",
                     "heading": current_heading,
                     "text": caption,
-                    "table_html": "",
-                    "img_path": img_path,
+                    "source_idx": source_idx,  # fetch full image record from content_list at query time
+                    "img_path": img_path,  # convenience copy for quick access
                     "caption": caption,
                     "pages": [item.get("page_idx", 0)],
                 }
@@ -231,8 +230,10 @@ def build_index(chunks: list[dict], model: SentenceTransformer):
         {
             "type": c["type"],
             "heading": c["heading"],
-            "text": c["text"][:2000],  # cap so metadata stays small
-            "table_html": c["table_html"][:10000],  # full HTML for tables
+            "text": c["text"][:2000],  # plain-text preview; cap to keep metadata lean
+            "source_idx": c.get(
+                "source_idx", -1
+            ),  # pointer back to content_list for stage 2
             "img_path": c["img_path"],
             "caption": c["caption"],
             "pages": json.dumps(c["pages"]),  # list → JSON string
@@ -260,10 +261,17 @@ def build_index(chunks: list[dict], model: SentenceTransformer):
 # ---------------------------------------------------------------------------
 
 
-def retrieve(query: str, collection, model: SentenceTransformer, top_k: int = 5):
+def retrieve(
+    query: str,
+    collection,
+    model: SentenceTransformer,
+    content: list,
+    top_k: int = 5,
+):
     """
     Stage 1 : semantic search → top-k chunks
-    Stage 2 : hydrate each result with its linked table HTML or image path
+    Stage 2 : hydrate tables/images by looking up source_idx in the original
+              content_list — no bulky HTML stored in Chroma metadata.
     """
     q_emb = model.encode([query], normalize_embeddings=True).tolist()
     results = collection.query(
@@ -277,16 +285,26 @@ def retrieve(query: str, collection, model: SentenceTransformer, top_k: int = 5)
         meta = results["metadatas"][0][i]
         distance = results["distances"][0][i]
 
+        # Stage 2: fetch full asset from content_list using source_idx
+        source_idx = meta.get("source_idx", -1)
+        table_html = ""
+        img_path = meta.get("img_path", "")
+        if source_idx >= 0 and source_idx < len(content):
+            raw = content[source_idx]
+            if meta["type"] == "table":
+                table_html = raw.get("table_body", "")
+            elif meta["type"] == "image":
+                img_path = raw.get("img_path", img_path)
+
         result = {
             "rank": i + 1,
             "score": round(1 - distance, 4),  # cosine similarity
             "type": meta["type"],
             "heading": meta["heading"],
             "pages": json.loads(meta["pages"]),
-            # Stage 2 payload — always present, empty string if not applicable
             "text": meta["text"],
-            "table_html": meta["table_html"],
-            "img_path": meta["img_path"],
+            "table_html": table_html,  # fetched from source at query time
+            "img_path": img_path,
             "caption": meta["caption"],
         }
         output.append(result)
@@ -327,7 +345,7 @@ def main():
     # Quick smoke test
     print("\n=== Smoke test retrieval ===")
     test_query = "What was Adobe's total revenue in fiscal 2023?"
-    results = retrieve(test_query, collection, model, top_k=3)
+    results = retrieve(test_query, collection, model, content, top_k=3)
     print(f"\nQuery: {test_query}\n")
     for r in results:
         print(
