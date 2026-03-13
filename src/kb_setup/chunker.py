@@ -26,7 +26,7 @@ import uuid
 from typing import Any
 
 from config import settings
-from text_utils import clean, table_column_headers, table_html_to_text
+from kb_setup.text_utils import clean, table_column_headers, table_html_to_text
 
 # ── Type alias ────────────────────────────────────────────────────────────────
 ContentList = list[dict[str, Any]]
@@ -154,10 +154,10 @@ def build_chunks(content: ContentList) -> list[Chunk]:
             text = clean(item.get("text", ""))
             if not text:
                 continue
-            if item.get("text_level"):          # heading — start new section
+            if item.get("text_level"):  # heading — start new section
                 _flush()
                 current_heading = text
-            else:                               # paragraph — accumulate
+            else:  # paragraph — accumulate
                 current_text_parts.append(text)
                 current_pages.add(item.get("page_idx", 0))
 

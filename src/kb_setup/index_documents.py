@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import json
 
-from chunker import build_chunks
+from kb_setup.chunker import build_chunks
 from config import settings
-from indexer import build_index, load_embedding_model, log_chunk_stats
+from kb_setup.indexer import build_index, load_embedding_model, log_chunk_stats
 
 # Re-export for backward compatibility
 from retriever import format_chunks_as_context, query_documents, retrieve  # noqa: F401
