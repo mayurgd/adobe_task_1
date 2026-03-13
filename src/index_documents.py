@@ -8,9 +8,9 @@ Two-stage retrieval strategy:
              - text chunks   : heading + paragraph text
              - table chunks  : heading + caption + table converted to plain text
              - image chunks  : heading + caption
-  Stage 2 — linked asset fetch using source_idx
-             - tables : source_idx → content_list[source_idx]["table_body"] (full HTML)
-             - images : source_idx → content_list[source_idx]["img_path"]
+  Stage 2 — linked asset fetch using stored metadata
+             - tables : full HTML stored in metadata["table_html"]
+             - images : file path stored in metadata["img_path"]
 
 Usage:
     python index_documents.py
@@ -31,13 +31,13 @@ from sentence_transformers import SentenceTransformer
 # ---------------------------------------------------------------------------
 
 CONTENT_LIST_PATH = Path(
-    "data/outputs/annual_reports/adbe-2023-annual-report/auto"
+    "/Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/outputs/annual_reports/adbe-2023-annual-report/auto/"
     "/adbe-2023-annual-report_content_list.json"
 )
 # Images produced by MinerU sit next to the content_list JSON
 IMAGES_BASE_DIR = CONTENT_LIST_PATH.parent / "images"
 
-CHROMA_DB_PATH = "data/outputs/chroma_db"
+CHROMA_DB_PATH = "/Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/chroma_db"
 COLLECTION_NAME = "adbe_2023_annual_report"
 
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
