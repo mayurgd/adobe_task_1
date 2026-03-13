@@ -30,14 +30,17 @@ from sentence_transformers import SentenceTransformer
 # Config
 # ---------------------------------------------------------------------------
 
-CONTENT_LIST_PATH = Path(
-    "/Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/outputs/annual_reports/adbe-2023-annual-report/auto/"
-    "/adbe-2023-annual-report_content_list.json"
+_REPO_ROOT = Path(__file__).parent.parent
+
+CONTENT_LIST_PATH = (
+    _REPO_ROOT
+    / "data/outputs/annual_reports/adbe-2023-annual-report/auto"
+    / "adbe-2023-annual-report_content_list.json"
 )
 # Images produced by MinerU sit next to the content_list JSON
 IMAGES_BASE_DIR = CONTENT_LIST_PATH.parent / "images"
 
-CHROMA_DB_PATH = "/Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/chroma_db"
+CHROMA_DB_PATH = str(_REPO_ROOT / "data" / "chroma_db")
 COLLECTION_NAME = "adbe_2023_annual_report"
 
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
@@ -323,6 +326,59 @@ def retrieve(
         output.append(result)
 
     return output
+
+
+# ---------------------------------------------------------------------------
+# Lazy singletons — used by the agent for query-time retrieval
+# ---------------------------------------------------------------------------
+
+_singleton_collection = None
+_singleton_model: SentenceTransformer | None = None
+_singleton_content: list | None = None
+
+
+def get_retrieval_resources():
+    """Return (collection, model, content_list), initialising lazily on first call."""
+    global _singleton_collection, _singleton_model, _singleton_content
+
+    if _singleton_model is None:
+        print(f"[info] Loading embedding model {EMBEDDING_MODEL} …")
+        _singleton_model = SentenceTransformer(EMBEDDING_MODEL)
+
+    if _singleton_collection is None:
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        _singleton_collection = client.get_collection(COLLECTION_NAME)
+        print(f"[info] Connected to ChromaDB collection '{COLLECTION_NAME}'")
+
+    if _singleton_content is None and CONTENT_LIST_PATH.exists():
+        with open(CONTENT_LIST_PATH, encoding="utf-8") as fh:
+            _singleton_content = json.load(fh)
+
+    return _singleton_collection, _singleton_model, _singleton_content or []
+
+
+def query_documents(query: str, top_k: int = 5) -> list[dict]:
+    """Embed *query* and return the top-k most relevant chunks using lazy singletons."""
+    collection, model, content = get_retrieval_resources()
+    return retrieve(query, collection, model, content, top_k=top_k)
+
+
+def format_chunks_as_context(chunks: list[dict]) -> str:
+    """Serialise retrieved chunks into a labelled context block for an LLM."""
+    parts = []
+    for chunk in chunks:
+        header = (
+            f"[{chunk['type'].upper()} | heading: {chunk['heading']} "
+            f"| pages: {chunk['pages']} | score: {chunk['score']}]"
+        )
+        if chunk["type"] == "text":
+            body = chunk["text"]
+        elif chunk["type"] == "table":
+            body = chunk["text"] or chunk["table_html"]
+        else:  # image
+            body = chunk["caption"] or "(image — no text available)"
+        parts.append(f"{header}\n{body}")
+    return "\n\n---\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

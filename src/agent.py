@@ -17,6 +17,8 @@ if not os.getenv("OPENAI_API_KEY"):
     )
 
 from deepagents import create_deep_agent  # noqa: E402  (after env check)
+from index_documents import format_chunks_as_context, query_documents  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,14 +46,56 @@ Guidelines:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tool registry  (add document-retrieval tools here when ready)
+# Tool
 # ─────────────────────────────────────────────────────────────────────────────
-# Example — uncomment and implement once ChromaDB index is ready:
-#
-# from tools.retrieval import search_documents, fetch_table, fetch_image
-# TOOLS = [search_documents, fetch_table, fetch_image]
 
-TOOLS: list = []  # no tools wired in yet
+
+@tool
+def answer_from_documents(query: str) -> str:
+    """Retrieve relevant passages from the indexed company documents and generate
+    a factual, source-grounded answer.
+
+    Use this tool whenever the user asks about specific figures, financial results,
+    strategies, risks, or any content that may be found in the uploaded company
+    documents (annual reports, quarterly reports, etc.).
+
+    Args:
+        query: The user's question expressed in natural language.
+
+    Returns:
+        A concise answer grounded in the retrieved document excerpts, with
+        references to headings and page numbers where available.
+    """
+    try:
+        chunks = query_documents(query, top_k=5)
+    except Exception as exc:
+        return f"[retrieval error] Could not query the document index: {exc}"
+
+    if not chunks:
+        return "No relevant content found in the document index for this query."
+
+    context = format_chunks_as_context(chunks)
+
+    rag_prompt = (
+        "You are a financial analyst assistant. Using ONLY the document excerpts "
+        "provided below, answer the question. Be concise and cite specific figures "
+        "and page numbers where available. If the answer cannot be determined from "
+        "the excerpts, say so explicitly — do not hallucinate.\n\n"
+        f"Question: {query}\n\n"
+        f"Document excerpts:\n{context}"
+    )
+
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    llm = ChatOpenAI(model=model_name, temperature=0)
+    response = llm.invoke(rag_prompt)
+    return response.content
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOOLS: list = [answer_from_documents]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
