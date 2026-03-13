@@ -37,20 +37,25 @@ Your job is to help executives and leadership teams answer questions such as:
   • "What were the key risks highlighted in the last quarter?"
   • "Summarise the strategic priorities for the next fiscal year."
 
-## Planning — MANDATORY for every request
-Before calling any tools or composing your reply you MUST call `write_todos`
-to lay out a numbered step-by-step plan for the full request.
+## RULE 0 — SCOPE GUARD (highest priority)
+You only answer questions about the company's documents — financials, strategy,
+risks, operations, and leadership insights. If the user asks anything outside
+this scope — including personal advice, general knowledge, unrelated topics,
+or questions about your own tools, capabilities, or internal workings — politely
+decline and redirect them to ask about the company documents. Do NOT attempt
+to answer out-of-scope questions under any circumstances.
 
-Example plan for a multi-question input:
-  1. Retrieve revenue trend data
-  2. Retrieve underperforming-department data
-  3. Retrieve key risks from last quarter
-  4. Synthesise all findings into a structured reply
+## RULE 1 — ALWAYS PLAN FIRST (non-negotiable)
+Your VERY FIRST action on EVERY request must be to call `write_todos`.
+Do NOT call any other tool until you have called `write_todos` at least once.
+List every sub-task you need to complete. After finishing each sub-task, call
+`write_todos` again to mark it as completed before moving to the next one.
+Only mark a task as completed if you have actually performed it using an
+available tool. If a task requires a capability you do not have (e.g. rendering
+a chart, writing a file), mark it as "pending" and tell the user what is
+missing instead of silently completing it.
 
-Update `write_todos` again (marking tasks done) as you complete each step.
-This makes your reasoning transparent and traceable.
-
-## Tool use — MANDATORY
+## RULE 2 — ALWAYS USE DOCUMENTS
 You have access to the `answer_from_documents` tool which searches the indexed
 company documents and returns relevant excerpts.
 
@@ -63,20 +68,7 @@ user asks about:
   - any specific fact, date, name, or number from a company document
 
 Do NOT answer from memory or general knowledge when document-specific
-information is being requested. Plan first, retrieve second, then answer.
-
-## Reflection — MANDATORY after every retrieval
-After each `answer_from_documents` call you MUST critically evaluate the result
-before moving on:
-  1. Is the answer complete and specific enough for this sub-question?
-  2. If there are gaps — refine the query and call `answer_from_documents`
-     again with a more targeted question.
-  3. If the answer is satisfactory — mark that `write_todos` step as
-     "completed" and proceed to the next sub-question.
-
-Keep iterating (retrieve → reflect → re-retrieve if needed) until every
-part of the user's request is backed by solid evidence from the documents.
-Only then compose the final response.
+information is being requested.
 
 ## Response guidelines
   - Be concise, factual, and data-driven.
@@ -224,45 +216,16 @@ def _get_langfuse():
 async def _stream_agent_turn(agent, conversation: list[dict]) -> str:
     """Stream one agent turn via astream_events.
 
-    Displays the full ReAct loop in the terminal:
-      [Agent's plan]      — free-text reasoning before the first tool call
-      ╔═ Agent plan ═╗    — write_todos planning step (numbered + status)
-      [Searching …]       — each answer_from_documents invocation
+    Displays document retrieval progress, the todo list, and the final answer:
+      [Searching documents] "…"  — each answer_from_documents invocation
       [Retrieval complete]
-      ╔═ Reflection N ╗   — LLM reasoning between tool calls (feedback loop)
-      Agent: …            — final synthesised response
+      ╔═ Todos ═╗               — plan captured from TodoListMiddleware state
+      Agent: …                   — final synthesised response
 
     Returns the complete reply string for appending to conversation history.
     """
     active_retrieval_runs: set[str] = set()
     final_reply: str = ""
-
-    # Tokens emitted before the first tool call (free-text plan / reasoning).
-    pre_tool_tokens: list[str] = []
-    first_tool_seen: bool = False
-
-    # Tokens emitted between tool calls — buffered so we can label them as
-    # ╔═ Reflection N ╗ when a subsequent tool fires, or as the final
-    # answer when the graph ends.  This implements the observe → reflect
-    # → act feedback loop described in the ReAct architecture.
-    current_llm_section: list[str] = []
-    any_tool_completed: bool = False
-    reflection_count: int = 0
-
-    def _flush_section_as_reflection() -> None:
-        nonlocal reflection_count
-        text = "".join(current_llm_section).strip()
-        current_llm_section.clear()
-        if not text:
-            return
-        reflection_count += 1
-        print(
-            f"\n╔═ Reflection {reflection_count} ══════════════════════════════",
-            flush=True,
-        )
-        for line in text.splitlines():
-            print(f"  {line}", flush=True)
-        print("╚══════════════════════════════════════════", flush=True)
 
     async for event in agent.astream_events({"messages": conversation}, version="v2"):
         kind: str = event["event"]
@@ -270,89 +233,49 @@ async def _stream_agent_turn(agent, conversation: list[dict]) -> str:
         run_id: str = event.get("run_id", "")
         data: dict = event.get("data", {})
 
-        # ── All on_tool_start events ─────────────────────────────────────────
-        if kind == "on_tool_start":
-            if not first_tool_seen:
-                # Very first tool: flush any free-text pre-tool reasoning.
-                first_tool_seen = True
-                if pre_tool_tokens:
-                    reasoning = "".join(pre_tool_tokens).strip()
-                    pre_tool_tokens.clear()
-                    if reasoning:
-                        print("\n[Agent's plan]", flush=True)
-                        for line in reasoning.splitlines():
-                            print(f"  {line}", flush=True)
-            elif any_tool_completed and current_llm_section:
-                # A new tool starts after a previous retrieval: the buffered
-                # LLM tokens are the agent's reflection on what it observed.
-                _flush_section_as_reflection()
-
-            # ── Planning / todo display ───────────────────────────────────────
-            if name == "write_todos":
-                inp = data.get("input", {})
-                todos = inp.get("todos", inp) if isinstance(inp, dict) else inp
-                print("\n╔═ Agent plan ══════════════════════════════", flush=True)
-                if isinstance(todos, list):
-                    for i, todo in enumerate(todos, 1):
-                        if isinstance(todo, dict):
-                            status = todo.get("status", "pending")
-                            title = todo.get("title", str(todo))
-                            marker = (
-                                "\u2713"
-                                if status in ("completed", "done")
-                                else "\u25cb"
-                            )
-                            print(f"  {i}. {marker} {title}  [{status}]", flush=True)
-                        else:
-                            print(f"  {i}. \u2022 {todo}", flush=True)
-                else:
-                    print(f"  {todos}", flush=True)
+        # ── Todo list update ──────────────────────────────────────────────────
+        if kind == "on_tool_start" and name == "write_todos":
+            inp = data.get("input", {})
+            todos_input = inp.get("todos", inp) if isinstance(inp, dict) else inp
+            if isinstance(todos_input, list) and todos_input:
+                print("\n╔═ Todos ══════════════════════════════════", flush=True)
+                for i, todo in enumerate(todos_input, 1):
+                    if isinstance(todo, dict):
+                        status = todo.get("status", "pending")
+                        title = todo.get("title") or todo.get("content") or str(todo)
+                        marker = "✓" if status in ("completed", "done") else "○"
+                        print(f"  {i}. {marker} {title}  [{status}]", flush=True)
+                    else:
+                        print(f"  {i}. • {todo}", flush=True)
                 print("╚══════════════════════════════════════════", flush=True)
 
-            # ── Document retrieval display ────────────────────────────────────
-            elif name == "answer_from_documents":
-                active_retrieval_runs.add(run_id)
-                inp = data.get("input", {})
-                query_str = (
-                    inp.get("query", str(inp)) if isinstance(inp, dict) else str(inp)
-                )
-                print(f'\n[Searching documents] "{query_str}"', flush=True)
+        # ── Document retrieval start ──────────────────────────────────────────
+        elif kind == "on_tool_start" and name == "answer_from_documents":
+            active_retrieval_runs.add(run_id)
+            inp = data.get("input", {})
+            query_str = (
+                inp.get("query", str(inp)) if isinstance(inp, dict) else str(inp)
+            )
+            print(f'\n[Searching documents] "{query_str}"', flush=True)
 
-        # ── Tool end ──────────────────────────────────────────────────────────
+        # ── Document retrieval end ────────────────────────────────────────────
         elif kind == "on_tool_end" and name == "answer_from_documents":
             active_retrieval_runs.discard(run_id)
-            any_tool_completed = True
             print("[Retrieval complete]", flush=True)
-
-        # ── LLM token stream ──────────────────────────────────────────────────
-        # Inner RAG LLM tokens (inside answer_from_documents) are suppressed;
-        # only outer agent LLM tokens are captured.
-        elif kind == "on_chat_model_stream" and not active_retrieval_runs:
-            chunk = data.get("chunk")
-            if chunk and hasattr(chunk, "content") and chunk.content:
-                if not first_tool_seen:
-                    # Pre-tool free-text reasoning.
-                    pre_tool_tokens.append(chunk.content)
-                else:
-                    # Post-tool tokens: buffered — we don't yet know if this
-                    # is reflection (more tools follow) or the final answer.
-                    current_llm_section.append(chunk.content)
 
         # ── Final graph state ─────────────────────────────────────────────────
         elif kind == "on_chain_end" and name == "LangGraph":
             output = data.get("output", {})
+            todos = output.get("todos", [])
             messages = output.get("messages", [])
             if messages:
                 last = messages[-1]
                 final_reply = last.content if hasattr(last, "content") else str(last)
 
-    # The last buffered LLM section is the agent's final answer (no subsequent
-    # tool call fired to flush it as reflection).  Print it cleanly.
-    answer = final_reply or "".join(current_llm_section)
-    if answer:
-        print(f"\nAgent: {answer}")
+    if final_reply:
+        print(f"\nAgent: {final_reply}")
 
-    return answer
+    return final_reply
 
 
 # ─────────────────────────────────────────────────────────────────────────────
