@@ -1,26 +1,31 @@
+"""
+agent.py
+
+Thin orchestrator: creates the deep agent and runs the interactive
+conversation loop.
+
+This module owns only two concerns:
+  1. The system prompt (domain policy for the agent).
+  2. The ``run()`` async function — the REPL that drives user ↔ agent turns.
+
+All other responsibilities (tools, tracing, streaming, config) live in their
+own modules and are imported here.
+
+Entry point:
+    python agent.py
+"""
+
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-from pathlib import Path
 
-# Load .env from the repo root (one level up from src/)
-from dotenv import load_dotenv
+from deepagents import create_deep_agent
+from langchain_openai import ChatOpenAI
 
-load_dotenv(Path(__file__).parent.parent / ".env")
-
-# ── Guard: OpenAI key must be present before any heavy imports ────────────────
-if not os.getenv("OPENAI_API_KEY"):
-    sys.exit(
-        "[error] OPENAI_API_KEY is not set.\n"
-        "Copy .env.example to .env and add your key, or export it in your shell."
-    )
-
-from deepagents import create_deep_agent  # noqa: E402  (after env check)
-from index_documents import format_chunks_as_context, query_documents  # noqa: E402
-from langchain_core.tools import tool  # noqa: E402
-from langchain_openai import ChatOpenAI  # noqa: E402
+from config import settings
+from streaming import stream_agent_turn
+from tools import TOOLS
+from tracing import create_agent_turn_span, get_langfuse
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System prompt
@@ -37,25 +42,82 @@ Your job is to help executives and leadership teams answer questions such as:
   • "What were the key risks highlighted in the last quarter?"
   • "Summarise the strategic priorities for the next fiscal year."
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## REASONING FRAMEWORK — ReAct Loop (mandatory on every request)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+On EVERY request you MUST follow the Think → Reason → Decide Action →
+Choose Tool → Observe loop below before producing a final answer.
+
+### Step 1 — THINK
+Internally reason about the user's query:
+  - What is being asked? What scope does it fall under?
+  - What information would be needed to answer it confidently?
+  - What do previous reasoning steps and observations already tell me?
+
+### Step 2 — REASON
+Based on your thinking, determine the next action:
+  - Do I have enough information to answer already?
+  - Do I need to retrieve information from the company documents?
+  - Do I need to plan sub-tasks first?
+
+### Step 3 — DECIDE ACTION
+Make an explicit decision and record it in your reasoning trace before
+acting. Choose one of:
+  a) Plan sub-tasks → call `write_todos` (if not done yet this request)
+  b) Retrieve information → call `answer_from_documents`
+  c) Formulate final answer → compose and return answer to user
+
+### Step 4 — CHOOSE TOOL (if action = a or b)
+Select the appropriate tool:
+  - `write_todos`           — for planning and sub-task tracking
+  - `answer_from_documents` — for retrieving company document excerpts
+
+  After calling the tool, proceed to Step 5.
+  If action = c (no tool needed), skip to Step 6.
+
+### Step 5 — OBSERVE RESULT
+After each tool call, explicitly evaluate the result:
+  - Did the tool return useful, relevant information?
+  - Is the information sufficient to answer the query, or do I need another
+    tool call?
+  - If a tool returned no results or failed, acknowledge this and decide
+    whether to retry, use a different approach, or admit insufficient data.
+  Loop back to Step 1 (Think) with the updated observations until you are
+  confident to proceed.
+
+### Step 6 — FORMULATE & TRACE FINAL ANSWER
+Only when you have sufficient observations, compose the final answer.
+Before returning it, verify:
+  - Is it grounded in retrieved document excerpts (not general knowledge)?
+  - Does it cite specific figures, dates, or named entities where available?
+  - If the documents do not contain sufficient information, does the answer
+    clearly say so rather than hallucinating?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## RULE 0 — SCOPE GUARD (highest priority)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 You only answer questions about the company's documents — financials, strategy,
 risks, operations, and leadership insights. If the user asks anything outside
 this scope — including personal advice, general knowledge, unrelated topics,
 or questions about your own tools, capabilities, or internal workings — politely
-decline and redirect them to ask about the company documents. Do NOT attempt
-to answer out-of-scope questions under any circumstances.
+decline and redirect them to ask about the company documents.
+Do NOT attempt to answer out-of-scope questions under any circumstances.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## RULE 1 — ALWAYS PLAN FIRST (non-negotiable)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Your VERY FIRST action on EVERY request must be to call `write_todos`.
 Do NOT call any other tool until you have called `write_todos` at least once.
 List every sub-task you need to complete. After finishing each sub-task, call
 `write_todos` again to mark it as completed before moving to the next one.
 Only mark a task as completed if you have actually performed it using an
-available tool. If a task requires a capability you do not have (e.g. rendering
-a chart, writing a file), mark it as "pending" and tell the user what is
-missing instead of silently completing it.
+available tool. If a task requires a capability you do not have, mark it as
+"pending" and inform the user instead of silently completing it.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## RULE 2 — ALWAYS USE DOCUMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 You have access to the `answer_from_documents` tool which searches the indexed
 company documents and returns relevant excerpts.
 
@@ -70,7 +132,9 @@ user asks about:
 Do NOT answer from memory or general knowledge when document-specific
 information is being requested.
 
-## Response guidelines
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## RESPONSE GUIDELINES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   - Be concise, factual, and data-driven.
   - Cite specific figures, percentages, page numbers, and named entities from
     the retrieved excerpts whenever available.
@@ -82,238 +146,34 @@ information is being requested.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tool
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@tool
-def answer_from_documents(query: str) -> str:
-    """Retrieve relevant passages from the indexed company documents and generate
-    a factual, source-grounded answer.
-
-    Use this tool whenever the user asks about specific figures, financial results,
-    strategies, risks, or any content that may be found in the uploaded company
-    documents (annual reports, quarterly reports, etc.).
-
-    Args:
-        query: The user's question expressed in natural language.
-
-    Returns:
-        A concise answer grounded in the retrieved document excerpts, with
-        references to headings and page numbers where available.
-    """
-    # Obtain a Langfuse client for nested tracing when credentials are present.
-    # get_client() inherits the active trace context (set by the outer agent-turn
-    # span in run()), so observations created here nest automatically.
-    _lf = None
-    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
-        try:
-            from langfuse import get_client as _lf_get_client  # type: ignore
-
-            _lf = _lf_get_client()
-        except (ImportError, Exception):
-            pass
-
-    # ── Retrieval step ────────────────────────────────────────────────────────
-    try:
-        if _lf:
-            with _lf.start_as_current_observation(
-                as_type="span",
-                name="document-retrieval",
-                input={"query": query, "top_k": 5},
-            ) as retrieval_obs:
-                chunks = query_documents(query, top_k=5)
-                retrieval_obs.update(
-                    output={
-                        "chunks_retrieved": len(chunks),
-                        "headings": [c.get("heading", "") for c in chunks],
-                    }
-                )
-        else:
-            chunks = query_documents(query, top_k=5)
-    except Exception as exc:
-        return f"[retrieval error] Could not query the document index: {exc}"
-
-    if not chunks:
-        return "No relevant content found in the document index for this query."
-
-    context = format_chunks_as_context(chunks)
-
-    rag_prompt = (
-        "You are a financial analyst assistant. Using ONLY the document excerpts "
-        "provided below, answer the question. Be concise and cite specific figures "
-        "and page numbers where available. If the answer cannot be determined from "
-        "the excerpts, say so explicitly — do not hallucinate.\n\n"
-        f"Question: {query}\n\n"
-        f"Document excerpts:\n{context}"
-    )
-
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    llm = ChatOpenAI(model=model_name, temperature=0)
-
-    # ── RAG generation step ───────────────────────────────────────────────────
-    if _lf:
-        with _lf.start_as_current_observation(
-            as_type="generation",
-            name="rag-generation",
-            model=model_name,
-            input=rag_prompt,
-        ) as rag_gen:
-            response = llm.invoke(rag_prompt)
-            rag_gen.update(output=response.content)
-    else:
-        response = llm.invoke(rag_prompt)
-
-    return response.content
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Tool registry
-# ─────────────────────────────────────────────────────────────────────────────
-
-TOOLS: list = [answer_from_documents]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Langfuse helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _get_langfuse():
-    """
-    Return a Langfuse client when credentials exist, otherwise None.
-    Uses the new get_client() API (langfuse >= 2.x).
-    """
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-
-    if not (public_key and secret_key):
-        return None  # credentials not configured — tracing disabled
-
-    try:
-        from langfuse import get_client  # type: ignore
-
-        host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
-        # get_client() reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY /
-        # LANGFUSE_HOST from the environment automatically.
-        client = get_client()
-        print(f"[info] Langfuse tracing enabled → {host}")
-        return client
-
-    except ImportError:
-        print(
-            "[warn] langfuse package not found — tracing disabled.\n"
-            "       Install it with:  pip install langfuse"
-        )
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Streaming helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def _stream_agent_turn(agent, conversation: list[dict]) -> str:
-    """Stream one agent turn via astream_events.
-
-    Displays document retrieval progress, the todo list, and the final answer:
-      [Searching documents] "…"  — each answer_from_documents invocation
-      [Retrieval complete]
-      ╔═ Todos ═╗               — plan captured from TodoListMiddleware state
-      Agent: …                   — final synthesised response
-
-    Returns the complete reply string for appending to conversation history.
-    """
-    active_retrieval_runs: set[str] = set()
-    final_reply: str = ""
-
-    async for event in agent.astream_events({"messages": conversation}, version="v2"):
-        kind: str = event["event"]
-        name: str = event.get("name", "")
-        run_id: str = event.get("run_id", "")
-        data: dict = event.get("data", {})
-
-        # ── Todo list update ──────────────────────────────────────────────────
-        if kind == "on_tool_start" and name == "write_todos":
-            inp = data.get("input", {})
-            todos_input = inp.get("todos", inp) if isinstance(inp, dict) else inp
-            if isinstance(todos_input, list) and todos_input:
-                print("\n╔═ Todos ══════════════════════════════════", flush=True)
-                for i, todo in enumerate(todos_input, 1):
-                    if isinstance(todo, dict):
-                        status = todo.get("status", "pending")
-                        title = todo.get("title") or todo.get("content") or str(todo)
-                        marker = "✓" if status in ("completed", "done") else "○"
-                        print(f"  {i}. {marker} {title}  [{status}]", flush=True)
-                    else:
-                        print(f"  {i}. • {todo}", flush=True)
-                print("╚══════════════════════════════════════════", flush=True)
-
-        # ── Document retrieval start ──────────────────────────────────────────
-        elif kind == "on_tool_start" and name == "answer_from_documents":
-            active_retrieval_runs.add(run_id)
-            inp = data.get("input", {})
-            query_str = (
-                inp.get("query", str(inp)) if isinstance(inp, dict) else str(inp)
-            )
-            print(f'\n[Searching documents] "{query_str}"', flush=True)
-
-        # ── Document retrieval end ────────────────────────────────────────────
-        elif kind == "on_tool_end" and name == "answer_from_documents":
-            active_retrieval_runs.discard(run_id)
-            print("[Retrieval complete]", flush=True)
-
-        # ── Final graph state ─────────────────────────────────────────────────
-        elif kind == "on_chain_end" and name == "LangGraph":
-            output = data.get("output", {})
-            todos = output.get("todos", [])
-            messages = output.get("messages", [])
-            if messages:
-                last = messages[-1]
-                final_reply = last.content if hasattr(last, "content") else str(last)
-
-    if final_reply:
-        print(f"\nAgent: {final_reply}")
-
-    return final_reply
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Interactive conversation loop
+# Conversation loop
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def run() -> None:
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    """Start the interactive Leadership Insight Agent REPL.
 
-    llm = ChatOpenAI(model=model_name, temperature=0)
+    Initialises the LLM, agent, and optional Langfuse client, then enters a
+    blocking input loop.  The full conversation history is passed on every
+    turn so the agent maintains context.
 
+    Exit with ``exit``, ``quit``, or Ctrl-C / Ctrl-D.
+    """
+    llm = ChatOpenAI(model=settings.openai_model, temperature=0)
     agent = create_deep_agent(
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         model=llm,
     )
+    langfuse = get_langfuse()
 
-    langfuse = _get_langfuse()
-
-    # Full message history — passed on every turn so the agent has context
     conversation: list[dict[str, str]] = []
 
-    print()
-    print("╔══════════════════════════════════════════════╗")
-    print("║      AI Leadership Insight Agent             ║")
-    print("╚══════════════════════════════════════════════╝")
-    print(f"  Model  : {model_name}")
-    print(
-        f"  Tracing: {'Langfuse enabled' if langfuse else 'disabled (set LANGFUSE_* vars)'}"
-    )
-    print()
-    print("  Ask any question about company performance, strategy, or risk.")
-    print("  Type 'exit' or 'quit' (or Ctrl-C) to stop.\n")
+    _print_banner(settings.openai_model, langfuse is not None)
 
     try:
         while True:
-            # ── Read input ───────────────────────────────────────────────────
+            # ── Read user input ───────────────────────────────────────────────
             try:
                 raw = input("You: ").strip()
             except (KeyboardInterrupt, EOFError):
@@ -322,44 +182,47 @@ async def run() -> None:
 
             if not raw:
                 continue
-
             if raw.lower() in {"exit", "quit"}:
                 print("Goodbye!")
                 break
 
-            # ── Append user turn ─────────────────────────────────────────────
             conversation.append({"role": "user", "content": raw})
 
-            # ── Stream agent turn under a Langfuse trace span ─────────────────
+            # ── Stream agent turn (optionally traced) ─────────────────────────
             try:
-                if langfuse:
-                    with langfuse.start_as_current_observation(
-                        as_type="span",
-                        name="agent-turn",
-                        input=raw,
-                    ) as span:
-                        with langfuse.start_as_current_observation(
-                            as_type="span",
-                            name="agent-invocation",
-                            input=raw,
-                        ) as invocation:
-                            reply = await _stream_agent_turn(agent, conversation)
-                            invocation.update(output=reply)
-                        span.update(output=reply)
-                else:
-                    reply = await _stream_agent_turn(agent, conversation)
+                with create_agent_turn_span(langfuse, raw) as span:
+                    reply = await stream_agent_turn(agent, conversation)
+                    span.update(output=reply)
             except Exception as exc:
                 print(f"\n[error] Agent call failed: {exc}\n")
-                conversation.pop()  # roll back the failed user message
+                conversation.pop()  # roll back failed user message
                 continue
 
-            # ── Append assistant turn ─────────────────────────────────────────
             conversation.append({"role": "assistant", "content": reply})
 
     finally:
-        # Flush any buffered Langfuse events before the process exits
         if langfuse:
             langfuse.flush()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _print_banner(model_name: str, tracing_enabled: bool) -> None:
+    tracing_label = (
+        "Langfuse enabled" if tracing_enabled else "disabled (set LANGFUSE_* vars)"
+    )
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║      AI Leadership Insight Agent             ║")
+    print("╚══════════════════════════════════════════════╝")
+    print(f"  Model  : {model_name}")
+    print(f"  Tracing: {tracing_label}")
+    print()
+    print("  Ask any question about company performance, strategy, or risk.")
+    print("  Type 'exit' or 'quit' (or Ctrl-C) to stop.\n")
 
 
 if __name__ == "__main__":
