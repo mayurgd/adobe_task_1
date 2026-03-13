@@ -17,6 +17,7 @@ if not os.getenv("OPENAI_API_KEY"):
     )
 
 from deepagents import create_deep_agent  # noqa: E402  (after env check)
+from langchain_openai import ChatOpenAI  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System prompt
@@ -95,9 +96,12 @@ def _get_langfuse():
 def run() -> None:
     model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    llm = ChatOpenAI(model=model_name, temperature=0)
+
     agent = create_deep_agent(
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
+        llm=llm,
     )
 
     langfuse = _get_langfuse()
