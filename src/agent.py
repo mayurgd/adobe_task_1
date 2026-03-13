@@ -58,10 +58,10 @@ TOOLS: list = []  # no tools wired in yet
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _build_langfuse_handler():
+def _get_langfuse():
     """
-    Return a Langfuse CallbackHandler when credentials exist, otherwise None.
-    Deferred import so a missing langfuse install only raises a soft warning.
+    Return a Langfuse client when credentials exist, otherwise None.
+    Uses the new get_client() API (langfuse >= 2.x).
     """
     public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
     secret_key = os.getenv("LANGFUSE_SECRET_KEY")
@@ -70,16 +70,14 @@ def _build_langfuse_handler():
         return None  # credentials not configured — tracing disabled
 
     try:
-        from langfuse.callback import CallbackHandler  # type: ignore
+        from langfuse import get_client  # type: ignore
 
         host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
-        handler = CallbackHandler(
-            public_key=public_key,
-            secret_key=secret_key,
-            host=host,
-        )
+        # get_client() reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY /
+        # LANGFUSE_HOST from the environment automatically.
+        client = get_client()
         print(f"[info] Langfuse tracing enabled → {host}")
-        return handler
+        return client
 
     except ImportError:
         print(
@@ -102,7 +100,7 @@ def run() -> None:
         system_prompt=SYSTEM_PROMPT,
     )
 
-    langfuse_handler = _build_langfuse_handler()
+    langfuse = _get_langfuse()
 
     # Full message history — passed on every turn so the agent has context
     conversation: list[dict[str, str]] = []
@@ -113,56 +111,77 @@ def run() -> None:
     print("╚══════════════════════════════════════════════╝")
     print(f"  Model  : {model_name}")
     print(
-        f"  Tracing: {'Langfuse enabled' if langfuse_handler else 'disabled (set LANGFUSE_* vars)'}"
+        f"  Tracing: {'Langfuse enabled' if langfuse else 'disabled (set LANGFUSE_* vars)'}"
     )
     print()
     print("  Ask any question about company performance, strategy, or risk.")
     print("  Type 'exit' or 'quit' (or Ctrl-C) to stop.\n")
 
-    while True:
-        # ── Read input ───────────────────────────────────────────────────────
-        try:
-            raw = input("You: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nGoodbye!")
-            break
+    try:
+        while True:
+            # ── Read input ───────────────────────────────────────────────────
+            try:
+                raw = input("You: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nGoodbye!")
+                break
 
-        if not raw:
-            continue
+            if not raw:
+                continue
 
-        if raw.lower() in {"exit", "quit"}:
-            print("Goodbye!")
-            break
+            if raw.lower() in {"exit", "quit"}:
+                print("Goodbye!")
+                break
 
-        # ── Append user turn ─────────────────────────────────────────────────
-        conversation.append({"role": "user", "content": raw})
+            # ── Append user turn ─────────────────────────────────────────────
+            conversation.append({"role": "user", "content": raw})
 
-        # ── Invoke agent ─────────────────────────────────────────────────────
-        invoke_config: dict = {}
-        if langfuse_handler:
-            invoke_config["callbacks"] = [langfuse_handler]
+            # ── Invoke agent under a Langfuse trace span ──────────────────────
+            # When langfuse is None the context manager is skipped and the
+            # agent runs without instrumentation.
+            try:
+                if langfuse:
+                    with langfuse.start_as_current_observation(
+                        as_type="span",
+                        name="agent-turn",
+                        input=raw,
+                    ) as span:
+                        with langfuse.start_as_current_observation(
+                            as_type="generation",
+                            name="llm-response",
+                            model=model_name,
+                            input=raw,
+                        ) as generation:
+                            state = agent.invoke({"messages": conversation})
+                            last_message = state["messages"][-1]
+                            reply: str = (
+                                last_message.content
+                                if hasattr(last_message, "content")
+                                else str(last_message)
+                            )
+                            generation.update(output=reply)
+                        span.update(output=reply)
+                else:
+                    state = agent.invoke({"messages": conversation})
+                    last_message = state["messages"][-1]
+                    reply = (
+                        last_message.content
+                        if hasattr(last_message, "content")
+                        else str(last_message)
+                    )
+            except Exception as exc:
+                print(f"\n[error] Agent call failed: {exc}\n")
+                conversation.pop()  # roll back the failed user message
+                continue
 
-        try:
-            state = agent.invoke(
-                {"messages": conversation},
-                config=invoke_config,
-            )
-        except Exception as exc:
-            print(f"\n[error] Agent call failed: {exc}\n")
-            conversation.pop()  # roll back the failed user message
-            continue
+            # ── Append assistant turn and print ──────────────────────────────
+            conversation.append({"role": "assistant", "content": reply})
+            print(f"\nAgent: {reply}\n")
 
-        # ── Extract AI reply ─────────────────────────────────────────────────
-        last_message = state["messages"][-1]
-        reply: str = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
-
-        # ── Append assistant turn and print ──────────────────────────────────
-        conversation.append({"role": "assistant", "content": reply})
-        print(f"\nAgent: {reply}\n")
+    finally:
+        # Flush any buffered Langfuse events before the process exits
+        if langfuse:
+            langfuse.flush()
 
 
 if __name__ == "__main__":
