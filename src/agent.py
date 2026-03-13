@@ -101,7 +101,7 @@ def run() -> None:
     agent = create_deep_agent(
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
-        llm=llm,
+        model=llm,
     )
 
     langfuse = _get_langfuse()
