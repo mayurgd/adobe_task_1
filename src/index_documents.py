@@ -62,6 +62,19 @@ def table_html_to_text(html: str) -> str:
         return ""
 
 
+def table_column_headers(html: str) -> str:
+    """Extract only the column header names from an HTML table."""
+    try:
+        dfs = pd.read_html(StringIO(html))
+        if not dfs:
+            return ""
+        # Flatten multi-level columns to strings, join with spaces
+        cols = dfs[0].columns.tolist()
+        return " | ".join(str(c) for c in cols)
+    except Exception:
+        return ""
+
+
 def clean(text: str) -> str:
     """Collapse excessive whitespace."""
     return re.sub(r"\s+", " ", text).strip()
@@ -145,9 +158,9 @@ def build_chunks(content: list) -> list[dict]:
             caption_list = item.get("table_caption") or []
             caption = clean(caption_list[0]) if caption_list else ""
 
-            # Convert table to plain text for embedding
             table_text = table_html_to_text(html)
-            embed_text = clean(f"{current_heading}\n{caption}\n{table_text}")
+            col_headers = table_column_headers(html)
+            embed_text = clean(f"{current_heading}\n{caption}\n{col_headers}")
 
             chunks.append(
                 {
