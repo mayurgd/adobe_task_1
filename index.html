@@ -124,6 +124,62 @@
     .msg-bubble{padding:9px 12px;border-radius:11px;font-size:13px;line-height:1.6;border:0.5px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);}
     .msg.user .msg-bubble{background:var(--accent-bg);border-color:var(--accent-bd);color:var(--accent-dark);border-radius:11px 11px 3px 11px;}
     .msg.ai .msg-bubble{border-radius:3px 11px 11px 11px;}
+
+    /* ── Markdown rendering inside AI bubbles ── */
+    .msg-bubble p { margin: 0 0 6px; }
+    .msg-bubble p:last-child { margin-bottom: 0; }
+    .msg-bubble ul, .msg-bubble ol { margin: 4px 0 8px 18px; padding: 0; }
+    .msg-bubble li { margin-bottom: 3px; line-height: 1.55; }
+    .msg-bubble li:last-child { margin-bottom: 0; }
+    .msg-bubble strong { font-weight: 600; color: var(--text-primary); }
+    .msg-bubble em { font-style: italic; }
+    .msg-bubble code {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11.5px;
+      background: var(--bg-tertiary);
+      border: 0.5px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+    }
+    .msg-bubble pre {
+      background: var(--bg-tertiary);
+      border: 0.5px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 8px 10px;
+      overflow-x: auto;
+      margin: 6px 0;
+    }
+    .msg-bubble pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: 11.5px;
+    }
+    .msg-bubble h1, .msg-bubble h2, .msg-bubble h3 {
+      font-size: 13px;
+      font-weight: 600;
+      margin: 8px 0 4px;
+      color: var(--text-primary);
+    }
+    .msg-bubble h1:first-child, .msg-bubble h2:first-child, .msg-bubble h3:first-child {
+      margin-top: 0;
+    }
+    .msg-bubble hr {
+      border: none;
+      border-top: 0.5px solid var(--border);
+      margin: 8px 0;
+    }
+    .msg-bubble blockquote {
+      border-left: 2px solid var(--accent-bd);
+      margin: 4px 0;
+      padding: 2px 10px;
+      color: var(--text-secondary);
+    }
+    /* Financial highlight row (bold label + value) */
+    .msg-bubble .md-kv {
+      display: flex; gap: 6px; align-items: baseline;
+    }
+
     .msg-sources{display:flex;gap:4px;flex-wrap:wrap;}
     .src-tag{font-size:10px;padding:2px 8px;border-radius:5px;background:var(--bg-secondary);border:0.5px solid var(--border);color:var(--text-secondary);cursor:pointer;transition:border-color 0.12s,color 0.12s;}
     .src-tag:hover{border-color:var(--accent-bd);color:var(--accent);}
@@ -155,7 +211,6 @@
     .asp-body{padding:8px 11px;display:flex;flex-direction:column;gap:6px;}
     .asp-body.collapsed{display:none;}
 
-    /* todo row */
     .asp-todo{
       display:flex;align-items:flex-start;gap:7px;
       padding:5px 8px;border-radius:var(--r-sm);
@@ -175,7 +230,6 @@
     .asp-todo.done .asp-todo-text{color:var(--green);text-decoration:line-through;text-decoration-color:rgba(59,109,17,0.4);}
     .asp-todo.active .asp-todo-text{color:var(--accent);font-weight:500;}
 
-    /* search row */
     .asp-search{
       display:flex;align-items:center;gap:7px;
       padding:5px 8px;border-radius:var(--r-sm);
@@ -186,8 +240,6 @@
       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .asp-search.done{background:var(--green-bg);border-color:var(--green-bd);}
     .asp-search.done .asp-search-text{color:var(--green);font-style:normal;}
-
-    /* ── end agent status panel ── */
 
     .input-area{padding:10px 14px 14px;border-top:0.5px solid var(--border);flex-shrink:0;}
     .input-row{display:flex;align-items:flex-end;gap:7px;border:0.5px solid var(--border-md);border-radius:var(--r-lg);padding:7px 8px;background:var(--bg-secondary);transition:border-color 0.15s;}
@@ -255,7 +307,7 @@
         </div>
       </div>
       <div class="pdf-empty" id="pdfEmpty">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
         <div class="pdf-empty-title">No document open</div>
         <div class="pdf-empty-sub">Upload a file and select it from the list</div>
       </div>
@@ -305,6 +357,132 @@ function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrol
 function scrollBottom(){const c=$('chatMessages');c.scrollTop=c.scrollHeight;}
 function indexedIds(){return Object.entries(docs).filter(([,v])=>v.indexStatus==='indexed').map(([k])=>k);}
 function processingCnt(){return Object.values(docs).filter(v=>v.indexStatus==='processing').length;}
+
+/* ══════════════════════════════════════════════════
+   MARKDOWN RENDERER
+   Converts the agent's markdown text to safe HTML.
+   Handles: headings, bold, italic, inline code,
+   fenced code blocks, bullet lists, numbered lists,
+   blockquotes, horizontal rules, and paragraphs.
+   ══════════════════════════════════════════════════ */
+function renderMarkdown(md) {
+  if (!md) return '';
+
+  // Escape HTML entities in raw text (but not in code spans we handle separately)
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  const lines = md.split('\n');
+  let html = '';
+  let i = 0;
+
+  // Helpers
+  function inlineFormat(text) {
+    // Fenced inline code (must come before bold/italic to avoid double-processing)
+    text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
+    // Bold+italic ***text***
+    text = text.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+    // Bold **text**
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic *text*
+    text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // Bold __text__
+    text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    // Italic _text_
+    text = text.replace(/_([^_]+)_/g, '<em>$1</em>');
+    return text;
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // ── Fenced code block ────────────────────────────────────────────────
+    if (line.trimStart().startsWith('```')) {
+      const lang = line.replace(/^```/, '').trim();
+      let code = '';
+      i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
+        code += esc(lines[i]) + '\n';
+        i++;
+      }
+      html += `<pre><code>${code.trimEnd()}</code></pre>`;
+      i++;
+      continue;
+    }
+
+    // ── Heading ──────────────────────────────────────────────────────────
+    const hMatch = line.match(/^(#{1,3})\s+(.+)/);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      html += `<h${level}>${inlineFormat(esc(hMatch[2]))}</h${level}>`;
+      i++; continue;
+    }
+
+    // ── Horizontal rule ──────────────────────────────────────────────────
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      html += '<hr>';
+      i++; continue;
+    }
+
+    // ── Blockquote ───────────────────────────────────────────────────────
+    if (line.startsWith('> ')) {
+      let bq = '';
+      while (i < lines.length && lines[i].startsWith('> ')) {
+        bq += inlineFormat(esc(lines[i].slice(2))) + ' ';
+        i++;
+      }
+      html += `<blockquote>${bq.trim()}</blockquote>`;
+      continue;
+    }
+
+    // ── Unordered list ───────────────────────────────────────────────────
+    if (/^(\s*[-*+])\s+/.test(line)) {
+      html += '<ul>';
+      while (i < lines.length && /^(\s*[-*+])\s+/.test(lines[i])) {
+        const item = lines[i].replace(/^\s*[-*+]\s+/, '');
+        html += `<li>${inlineFormat(esc(item))}</li>`;
+        i++;
+      }
+      html += '</ul>';
+      continue;
+    }
+
+    // ── Ordered list ─────────────────────────────────────────────────────
+    if (/^\d+\.\s+/.test(line)) {
+      html += '<ol>';
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        const item = lines[i].replace(/^\d+\.\s+/, '');
+        html += `<li>${inlineFormat(esc(item))}</li>`;
+        i++;
+      }
+      html += '</ol>';
+      continue;
+    }
+
+    // ── Blank line → paragraph break ─────────────────────────────────────
+    if (line.trim() === '') {
+      i++; continue;
+    }
+
+    // ── Plain paragraph ───────────────────────────────────────────────────
+    // Accumulate consecutive non-special lines into one <p>
+    let para = '';
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !/^(#{1,3}|```|> |\s*[-*+]\s|\d+\.\s|-{3,}|\*{3,})/.test(lines[i])
+    ) {
+      para += (para ? ' ' : '') + lines[i].trim();
+      i++;
+    }
+    if (para) {
+      html += `<p>${inlineFormat(esc(para))}</p>`;
+    }
+  }
+
+  return html;
+}
 
 function updateStatus(){
   const total=Object.keys(docs).length,indexed=indexedIds().length,pending=processingCnt();
@@ -510,11 +688,10 @@ function openSource(s){
    AGENT STATUS PANEL
    ══════════════════════════════════════════════════ */
 
-// State for the live panel injected into the chat while the agent runs.
-let _livePanelEl = null;      // the .agent-status-panel DOM node
-let _liveTodos   = [];        // [{title, status}] — latest snapshot
-let _searchItems = [];        // [{query, done}]
-let _panelOpen   = true;      // expand/collapse state
+let _livePanelEl = null;
+let _liveTodos   = [];
+let _searchItems = [];
+let _panelOpen   = true;
 
 function _createLivePanel() {
   const panel = document.createElement('div');
@@ -538,7 +715,6 @@ function _createLivePanel() {
       </div>
     </div>`;
 
-  // toggle expand/collapse
   panel.querySelector('#aspToggle').onclick = () => {
     _panelOpen = !_panelOpen;
     panel.querySelector('#aspBody').classList.toggle('collapsed', !_panelOpen);
@@ -559,12 +735,8 @@ function _renderLivePanel() {
   const body = _livePanelEl.querySelector('#aspBody');
   if (!body) return;
 
-  // Find the "active" todo (first pending/in-progress)
-  const activeIdx = _liveTodos.findIndex(t =>
-    !['completed','done'].includes(t.status)
-  );
+  const activeIdx = _liveTodos.findIndex(t => !['completed','done'].includes(t.status));
 
-  // Build todo rows
   const todoHTML = _liveTodos.map((t, i) => {
     const isDone = ['completed','done'].includes(t.status);
     const isActive = !isDone && i === activeIdx;
@@ -579,7 +751,6 @@ function _renderLivePanel() {
       </div>`;
   }).join('');
 
-  // Build search rows
   const searchHTML = _searchItems.map(s => `
     <div class="asp-search ${s.done ? 'done' : ''}">
       <span class="asp-search-icon">${s.done ? '✓' : '🔍'}</span>
@@ -600,7 +771,6 @@ function _finalizeLivePanel(answer, sources) {
   if (!_livePanelEl) return;
   const panel = _livePanelEl;
 
-  // Collapse the status panel and mark it done
   const header = panel.querySelector('.asp-header-title');
   if (header) header.textContent = 'Agent completed';
   const chevron = panel.querySelector('.asp-chevron');
@@ -608,7 +778,6 @@ function _finalizeLivePanel(answer, sources) {
   const body = panel.querySelector('#aspBody');
   if (body) body.classList.add('collapsed');
 
-  // Mark all todos done visually
   if (_liveTodos.length) {
     _liveTodos = _liveTodos.map(t => ({...t, status:'completed'}));
     body.classList.remove('collapsed'); _renderLivePanel(); body.classList.add('collapsed');
@@ -616,7 +785,7 @@ function _finalizeLivePanel(answer, sources) {
 
   _livePanelEl = null;
 
-  // Append the actual answer as a normal AI message
+  // ── Render markdown in the answer before inserting ──
   addMessage('ai', answer, sources);
 }
 
@@ -627,13 +796,21 @@ function _escHtml(s) {
 }
 
 /* ── CHAT MESSAGES ── */
-function addMessage(role, html, sources) {
+function addMessage(role, text, sources) {
   const ce=$('chatEmpty');if(ce)ce.remove();
   const c=$('chatMessages'),div=document.createElement('div');
   div.className='msg '+role;
+
+  // For AI messages, render markdown; for user messages, escape and preserve newlines
+  const bubbleContent = role === 'ai'
+    ? renderMarkdown(text)
+    : _escHtml(text).replace(/\n/g, '<br>');
+
   let srcHTML='';
-  if(sources&&sources.length)srcHTML='<div class="msg-sources">'+sources.map(s=>`<span class="src-tag" onclick='openSource(${JSON.stringify(s)})'>📄 ${s.label}</span>`).join('')+'</div>';
-  div.innerHTML=`<div class="msg-av ${role==='ai'?'ai':''}">${role==='user'?'You':'AI'}</div><div class="msg-col"><div class="msg-bubble">${html}</div>${srcHTML}<span class="msg-time">${now()}</span></div>`;
+  if(sources&&sources.length){
+    srcHTML='<div class="msg-sources">'+sources.map(s=>`<span class="src-tag" onclick='openSource(${JSON.stringify(s)})'>📄 ${s.label}</span>`).join('')+'</div>';
+  }
+  div.innerHTML=`<div class="msg-av ${role==='ai'?'ai':''}">${role==='user'?'You':'AI'}</div><div class="msg-col"><div class="msg-bubble">${bubbleContent}</div>${srcHTML}<span class="msg-time">${now()}</span></div>`;
   c.appendChild(div);scrollBottom();
 }
 
@@ -651,7 +828,6 @@ async function sendQuestion() {
   const btn = $('sendBtn');
   btn.disabled = true; btn.style.opacity = '0.5';
 
-  // Create the live panel immediately
   _createLivePanel();
   _updatePanelTitle('Agent is thinking…');
 
@@ -674,9 +850,8 @@ async function sendQuestion() {
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
-      // SSE lines end with \n\n
       const parts = buf.split('\n\n');
-      buf = parts.pop(); // keep incomplete tail
+      buf = parts.pop();
 
       for (const part of parts) {
         const line = part.trim();
@@ -688,10 +863,9 @@ async function sendQuestion() {
     }
 
   } catch (err) {
-    // Replace live panel with error
     if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
     addMessage('ai',
-      `<span style="color:var(--text-secondary)">Could not reach backend at <code style="font-size:11px">${BACKEND_URL}</code>.<br>Is the FastAPI server running?</span>`,
+      `Could not reach backend at \`${BACKEND_URL}\`.\nIs the FastAPI server running?`,
       []);
   } finally {
     isLoading = false;
@@ -703,7 +877,6 @@ function _handleAgentEvent(evt, question) {
   switch (evt.type) {
 
     case 'todos': {
-      // Merge latest snapshot: preserve existing statuses, add new items
       const incoming = evt.todos || [];
       _liveTodos = incoming.map((t, i) => {
         const existing = _liveTodos[i];
@@ -722,7 +895,6 @@ function _handleAgentEvent(evt, question) {
     }
 
     case 'retrieved': {
-      // Mark last unfinished search as done
       const last = [..._searchItems].reverse().find(s => !s.done);
       if (last) last.done = true;
       _updatePanelTitle('Generating answer…');
@@ -737,9 +909,7 @@ function _handleAgentEvent(evt, question) {
 
     case 'error': {
       if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
-      addMessage('ai',
-        `<span style="color:#993C1D">⚠ ${_escHtml(evt.message || 'Unknown error')}</span>`,
-        []);
+      addMessage('ai', `⚠ ${evt.message || 'Unknown error'}`, []);
       break;
     }
   }
