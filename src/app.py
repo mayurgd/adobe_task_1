@@ -177,15 +177,12 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
         # MinerU output convention:
         #   <DOCS_OUTPUT_DIR>/<stem>/auto/<stem>_content_list.json
         # The stem is derived from the *original* filename (without the doc_id prefix).
-        original_stem = Path(
-            doc_registry[doc_id]["name"]
-        ).stem  # e.g. "adbe-2023-annual-report"
+        saved_stem = (
+            file_path.stem
+        )  # uses the uuid-prefixed filename MinerU actually saw
 
         content_list_path = (
-            DOCS_OUTPUT_DIR
-            / original_stem
-            / "auto"
-            / f"{original_stem}_content_list.json"
+            DOCS_OUTPUT_DIR / saved_stem / "auto" / f"{saved_stem}_content_list.json"
         )
         if not content_list_path.exists():
             raise FileNotFoundError(f"MinerU output not found: {content_list_path}")
