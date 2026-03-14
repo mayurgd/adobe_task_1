@@ -77,6 +77,15 @@ class Settings(BaseSettings):
 
     @computed_field
     @property
+    def content_list_path(self) -> Path:
+        base = Path(self.mineru_output_dir)
+        matches = list(base.glob("*/auto/*_content_list.json"))
+        if not matches:
+            return base
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
+    @computed_field
+    @property
     def langfuse_enabled(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
 
