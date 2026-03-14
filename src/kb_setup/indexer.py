@@ -4,8 +4,8 @@ indexer.py
 Embeds a list of chunks (produced by chunker.py) and persists them in a
 ChromaDB collection.
 
-Full chunk text is stored directly in ChromaDB metadata — no truncation,
-no sidecar file. This mirrors how table text has always been stored.
+Full chunk text is stored directly in ChromaDB metadata. Tables and images
+are stored as JSON-serialised lists under the ``tables`` and ``images`` keys.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ Chunk = dict[str, Any]
 
 
 def load_embedding_model(model_name: str | None = None) -> SentenceTransformer:
-    """Load and return the SentenceTransformer embedding model."""
     name = model_name or settings.embedding_model
     print(f"[info] Loading embedding model: {name} …")
     return SentenceTransformer(name)
@@ -45,20 +44,6 @@ def build_index(
     chroma_db_path: str | None = None,
     collection_name: str | None = None,
 ) -> chromadb.Collection:
-    """Embed *chunks* and store them in a (re-created) ChromaDB collection.
-
-    Full chunk text is stored in metadata with no truncation — identical to
-    how table text is handled.
-
-    Args:
-        chunks:           List of chunk dicts as returned by ``build_chunks()``.
-        model:            Optional pre-loaded SentenceTransformer.
-        chroma_db_path:   Override for ``settings.chroma_db_path``.
-        collection_name:  Override for ``settings.collection_name``.
-
-    Returns:
-        The populated ``chromadb.Collection`` instance.
-    """
     if model is None:
         model = load_embedding_model()
 
@@ -111,8 +96,8 @@ def build_index(
 def _build_metadatas(chunks: list[Chunk]) -> list[dict]:
     """Serialise each chunk into a ChromaDB-compatible metadata dict.
 
-    ``text`` is stored in full — no truncation. ChromaDB metadata values must
-    be ``str | int | float | bool``; lists (``pages``) are JSON-serialised.
+    ChromaDB metadata values must be ``str | int | float | bool``.
+    Lists (``pages``, ``tables``, ``images``) are JSON-serialised to strings.
     """
     return [
         {
@@ -123,6 +108,9 @@ def _build_metadatas(chunks: list[Chunk]) -> list[dict]:
             "img_path": c.get("img_path", ""),
             "caption": c.get("caption", ""),
             "pages": json.dumps(c["pages"]),
+            # New: structured assets serialised as JSON strings
+            "tables": json.dumps(c.get("tables", [])),
+            "images": json.dumps(c.get("images", [])),
         }
         for c in chunks
     ]
@@ -134,10 +122,15 @@ def _build_metadatas(chunks: list[Chunk]) -> list[dict]:
 
 
 def log_chunk_stats(chunks: list[Chunk]) -> None:
-    """Print a brief summary of chunk counts by type to stdout."""
     type_counts: dict[str, int] = {}
     for c in chunks:
         type_counts[c["type"]] = type_counts.get(c["type"], 0) + 1
+
+    table_count = sum(len(c.get("tables", [])) for c in chunks)
+    image_count = sum(len(c.get("images", [])) for c in chunks)
+
     print(f"Total chunks : {len(chunks)}")
     for t, count in sorted(type_counts.items()):
         print(f"  {t:8s}: {count}")
+    print(f"  (tables embedded as metadata: {table_count})")
+    print(f"  (images embedded as metadata: {image_count})")
