@@ -1,65 +1,58 @@
 """
 index_documents.py
 
-CLI entry point — builds the ChromaDB vector index from a MinerU
-``_content_list.json`` file.
-
-Pipeline
---------
-1. Load the raw content_list JSON.
-2. Build typed chunks           (chunker.build_chunks)
-3. Embed + store in ChromaDB    (indexer.build_index)
-4. Smoke-test retrieval         (retriever.retrieve)
+Indexes a document into its own ChromaDB collection and registers it.
+Called by the UI upload handler or directly as a CLI.
 
 Usage:
-    python index_documents.py
-
-The script is idempotent: re-running it drops and recreates the collection.
-
-Note: ``query_documents`` and ``format_chunks_as_context`` are also re-exported
-from this module so that any legacy import of the form
-``from index_documents import query_documents`` keeps working.
+    python index_documents.py --file "Q2 Results.pdf" --content-list /path/to/_content_list.json
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-
-from kb_setup.chunker import build_chunks
+from pathlib import Path
 from config import settings
-from kb_setup.indexer import build_index, load_embedding_model, log_chunk_stats
-
-# Re-export for backward compatibility
-from retriever import format_chunks_as_context, query_documents, retrieve
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────────────────────
+from doc_registry import collection_name_for, register
+from kb_setup.chunker import build_chunks
+from kb_setup.indexer import build_index, load_embedding_model
 
 
-def main() -> None:
-    # ── 1. Load content list ──────────────────────────────────────────────────
-    print("=== Loading content list ===")
-    with open(settings.content_list_path, encoding="utf-8") as f:
+def index_file(filename: str, content_list_path: str) -> dict:
+    """Index a single document. Re-indexing the same filename overwrites.
+
+    Args:
+        filename:          Original filename e.g. "Q2 Results.pdf"
+        content_list_path: Path to the MinerU _content_list.json
+
+    Returns:
+        {"filename", "collection_name", "chunk_count"}
+    """
+    filename = Path(filename).name  # always use basename, never full path
+    coll_name = collection_name_for(filename)
+
+    with open(content_list_path, encoding="utf-8") as f:
         content = json.load(f)
-    print(f"Loaded {len(content)} raw elements")
 
-    # ── 2. Build chunks ───────────────────────────────────────────────────────
-    print("\n=== Building chunks ===")
     chunks = build_chunks(content)
-    log_chunk_stats(chunks)
-
-    # ── 3. Embed + index ──────────────────────────────────────────────────────
-    print("\n=== Loading embedding model ===")
     model = load_embedding_model()
+    build_index(chunks, model, collection_name=coll_name)
+    register(filename, coll_name, len(chunks))
 
-    print("\n=== Building ChromaDB index ===")
-    collection = build_index(chunks, model)
-    print(f"\nIndex saved to : {settings.chroma_db_path}")
-    print(f"Collection     : {settings.collection_name}")
-    print(f"Total vectors  : {collection.count()}")
+    print(f"Indexed '{filename}' → collection '{coll_name}' ({len(chunks)} chunks)")
+    return {
+        "filename": filename,
+        "collection_name": coll_name,
+        "chunk_count": len(chunks),
+    }
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", required=True, help="Original filename")
+    parser.add_argument(
+        "--content-list", required=True, help="Path to _content_list.json"
+    )
+    args = parser.parse_args()
+    index_file(args.file, args.content_list)

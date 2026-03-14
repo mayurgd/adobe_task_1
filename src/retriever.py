@@ -1,287 +1,150 @@
 """
 retriever.py
 
-Query-time retrieval: semantic search over the ChromaDB collection, two-stage
-asset hydration, cross-encoder reranking, and context serialisation for LLM
-consumption.
+Semantic search + reranking against a specific document's ChromaDB collection.
 
-Retrieval pipeline
-------------------
-Stage 1 — Semantic search (bi-encoder)
-    The query is embedded with BGE and ChromaDB returns the top
-    ``retrieval_candidate_k`` candidates by cosine similarity.
-
-Stage 2 — Asset hydration
-    ``tables`` and ``images`` are deserialised from their JSON-string metadata.
-    Each chunk now carries its full section context — paragraphs AND tables.
-
-Stage 3 — Cross-encoder reranking
-    A cross-encoder scores every (query, chunk_text) pair and re-sorts.
+Pipeline:
+    1. Bi-encoder embeds the query → ChromaDB returns top candidates
+    2. Cross-encoder reranks → returns top_k results
 
 Public API:
-    query_documents(query, top_k)    -> list[dict]
-    format_chunks_as_context(chunks) -> str
-    retrieve(query, collection, model, content, top_k) -> list[dict]
+    query_documents(query, collection_name, top_k) -> list[dict]
+    format_chunks_as_context(chunks)               -> str
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import chromadb
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from config import settings
 
-ContentList = list[dict[str, Any]]
-ResultChunk = dict[str, Any]
-
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
+# ── Model singletons (expensive to load, shared across calls) ─────────────────
+_model: SentenceTransformer | None = None
+_reranker: CrossEncoder | None = None
+
+
+def _get_models() -> tuple[SentenceTransformer, CrossEncoder]:
+    global _model, _reranker
+    if _model is None:
+        _model = SentenceTransformer(settings.embedding_model)
+    if _reranker is None:
+        _reranker = CrossEncoder(settings.reranker_model)
+    return _model, _reranker
+
+
+def _get_collection(collection_name: str) -> chromadb.Collection:
+    client = chromadb.PersistentClient(path=settings.chroma_db_path)
+    return client.get_collection(collection_name)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core retrieval
-# ─────────────────────────────────────────────────────────────────────────────
 
 
-def retrieve(
+def query_documents(
     query: str,
-    collection: chromadb.Collection,
-    model: SentenceTransformer,
-    content: ContentList,
+    collection_name: str,
     top_k: int | None = None,
-    reranker: CrossEncoder | None = None,
-    candidate_k: int | None = None,
-) -> list[ResultChunk]:
-    """Perform a three-stage retrieval for *query*.
+) -> list[dict]:
+    """Query a single document's collection.
 
-    Each returned result dict contains:
-
-    ============  ===================================================
-    Key           Description
-    ============  ===================================================
-    rank          1-based rank (int).
-    score         Reranker logit if reranked, else cosine similarity.
-    type          Always ``"text"`` (tables are metadata, not chunks).
-    heading       Section heading.
-    pages         List of page indices (int).
-    text          Full paragraph body for this chunk.
-    tables        List of table dicts: {caption, text, html,
-                  col_headers, source_idx, page}.
-    images        List of image dicts: {caption, img_path,
-                  source_idx, page}.
-    img_path      First image path ('' if none) — backward compat.
-    caption       '' — captions live inside tables/images lists.
-    ============  ===================================================
+    Args:
+        query:           Natural-language question.
+        collection_name: Collection name from doc_registry.collection_name_for().
+        top_k:           Chunks to return (default: settings.default_top_k).
     """
-    k = top_k if top_k is not None else settings.default_top_k
-    fetch_k = max(
-        candidate_k if candidate_k is not None else settings.retrieval_candidate_k,
-        k,
-    )
+    k = top_k or settings.default_top_k
+    fetch_k = max(settings.retrieval_candidate_k, k)
+    model, reranker = _get_models()
+    collection = _get_collection(collection_name)
 
-    # ── Stage 1: bi-encoder search ────────────────────────────────────────────
-    q_emb = model.encode(
-        [BGE_QUERY_PREFIX + query],
-        normalize_embeddings=True,
-    ).tolist()
-
+    # Stage 1 — semantic search
+    q_emb = model.encode([BGE_QUERY_PREFIX + query], normalize_embeddings=True).tolist()
     results = collection.query(
         query_embeddings=q_emb,
         n_results=fetch_k,
-        include=["metadatas", "distances", "documents"],
+        include=["metadatas", "distances"],
     )
 
-    # ── Stage 2: hydrate assets ───────────────────────────────────────────────
-    candidates: list[ResultChunk] = []
-    for i in range(len(results["ids"][0])):
-        meta = results["metadatas"][0][i]
-        distance = results["distances"][0][i]
-
-        # Deserialise JSON-string lists back to Python objects
-        tables = json.loads(meta.get("tables", "[]"))
-        images = json.loads(meta.get("images", "[]"))
-
+    # Stage 2 — hydrate
+    candidates = []
+    for i, (meta, dist) in enumerate(
+        zip(results["metadatas"][0], results["distances"][0])
+    ):
         candidates.append(
             {
-                "score": round(1 - distance, 4),
-                "type": meta["type"],
+                "score": round(1 - dist, 4),
                 "heading": meta["heading"],
-                "pages": json.loads(meta["pages"]),
                 "text": meta["text"],
-                "tables": tables,
-                "images": images,
+                "pages": json.loads(meta["pages"]),
+                "tables": json.loads(meta.get("tables", "[]")),
+                "images": json.loads(meta.get("images", "[]")),
             }
         )
 
-    # ── Stage 3: cross-encoder reranking ─────────────────────────────────────
-    if reranker is not None:
-        candidates = _rerank(query, candidates, reranker)
+    # Stage 3 — rerank
+    pairs = [(query, _rerank_text(c)) for c in candidates]
+    scores = reranker.predict(pairs).tolist()
+    for c, s in zip(candidates, scores):
+        c["score"] = round(s, 4)
+    candidates.sort(key=lambda c: c["score"], reverse=True)
 
-    for rank, chunk in enumerate(candidates[:k], start=1):
-        chunk["rank"] = rank
+    # Drop negatives (cross-encoder: negative = not relevant)
+    candidates = [c for c in candidates if c["score"] >= 0] or candidates[:1]
 
+    for rank, c in enumerate(candidates[:k], start=1):
+        c["rank"] = rank
     return candidates[:k]
 
 
-def _rerank(
-    query: str,
-    candidates: list[ResultChunk],
-    reranker: CrossEncoder,
-) -> list[ResultChunk]:
-    pairs = [(query, _rerank_text(c)) for c in candidates]
-    scores: list[float] = reranker.predict(pairs).tolist()
-    for chunk, score in zip(candidates, scores):
-        chunk["score"] = round(score, 4)
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    # Drop chunks the cross-encoder considers irrelevant (negative logit).
-    # ms-marco cross-encoders are not calibrated — negative scores reliably
-    # indicate the passage is not relevant to the query.
-    positives = [c for c in candidates if c["score"] >= 0]
-    # Guard: if everything is negative (very off-topic query), return the
-    # single best candidate rather than an empty list.
-    return positives if positives else candidates[:1]
-
-
-def _rerank_text(chunk: ResultChunk) -> str:
-    """Build the passage text sent to the cross-encoder.
-
-    Paragraph text is used as-is. For tables we send a compact digest:
-        caption (if any) + column headers + first 2 data rows.
-
-    This gives the reranker enough signal to judge relevance without the
-    noise and token cost of full table dumps.
-    """
+def format_chunks_as_context(chunks: list[dict]) -> str:
+    """Serialise chunks into a labelled context string for the LLM."""
     parts = []
-    if chunk["text"]:
-        parts.append(f"{chunk['heading']}\n{chunk['text']}")
-    else:
-        parts.append(chunk["heading"])
-
-    for t in chunk.get("tables", []):
-        table_parts = []
-        if t.get("caption"):
-            table_parts.append(t["caption"])
-        table_parts.append(_table_digest(t))
-        parts.append("\n".join(table_parts))
-
-    return "\n\n".join(parts).strip()
-
-
-def _table_digest(table: dict, max_rows: int = 2) -> str:
-    """Return column headers + up to *max_rows* data rows as a compact string.
-
-    If pandas assigned auto-integer column indices (e.g. "0 | 1 | 2") because
-    the table has no <th> header row, the stored col_headers are meaningless.
-    In that case we treat the first data line from the plain-text as the header
-    and take the next max_rows lines as data.
-    """
-    col_headers: str = table.get("col_headers", "")
-
-    # Detect auto-integer headers like "0 | 1 | 2" — not useful for scoring
-    if _is_auto_int_headers(col_headers):
-        col_headers = ""
-
-    plain: str = table.get("text", "")
-    lines = [l for l in plain.splitlines() if l.strip()] if plain else []
-
-    if col_headers:
-        # Real headers available — skip the pandas header line, take max_rows data lines
-        data_lines = lines[1 : max_rows + 1]
-    else:
-        # No real headers — first line IS the header, next max_rows are data
-        col_headers = lines[0] if lines else ""
-        data_lines = lines[1 : max_rows + 1]
-
-    parts = [p for p in [col_headers, "\n".join(data_lines)] if p]
-    return "\n".join(parts)
-
-
-def _is_auto_int_headers(col_headers: str) -> bool:
-    """Return True if col_headers looks like pandas auto-integer indices, e.g. '0 | 1 | 2'."""
-    if not col_headers:
-        return False
-    return all(part.strip().isdigit() for part in col_headers.split("|"))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Context serialiser
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def format_chunks_as_context(chunks: list[ResultChunk]) -> str:
-    """Serialise retrieved chunks into a labelled context block for an LLM.
-
-    For each chunk, paragraph text is followed by any tables (as plain text)
-    and image captions — keeping the full section together.
-    """
-    parts: list[str] = []
     for chunk in chunks:
-        header = f"[TEXT | heading: {chunk['heading']} | pages: {chunk['pages']}]"
-        body_parts = []
+        header = f"[heading: {chunk['heading']} | pages: {chunk['pages']}]"
+        body = []
         if chunk["text"]:
-            body_parts.append(chunk["text"])
-
-        for idx, t in enumerate(chunk.get("tables", []), start=1):
-            table_header = f"[TABLE {idx}"
-            if t.get("caption"):
-                table_header += f" — {t['caption']}"
-            table_header += "]"
-            body_parts.append(f"{table_header}\n{t['text'] or t['html']}")
-
-        for idx, img in enumerate(chunk.get("images", []), start=1):
-            img_label = f"[IMAGE {idx}"
-            if img.get("caption"):
-                img_label += f" — {img['caption']}"
-            img_label += "]"
-            body_parts.append(img_label)
-
-        parts.append(f"{header}\n" + "\n\n".join(body_parts))
-
+            body.append(chunk["text"])
+        for i, t in enumerate(chunk.get("tables", []), 1):
+            label = (
+                f"[TABLE {i}" + (f" — {t['caption']}" if t.get("caption") else "") + "]"
+            )
+            body.append(f"{label}\n{t['text'] or t['html']}")
+        for i, img in enumerate(chunk.get("images", []), 1):
+            label = (
+                f"[IMAGE {i}"
+                + (f" — {img['caption']}" if img.get("caption") else "")
+                + "]"
+            )
+            body.append(label)
+        parts.append(f"{header}\n" + "\n\n".join(body))
     return "\n\n---\n\n".join(parts)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Lazy singletons
-# ─────────────────────────────────────────────────────────────────────────────
-
-_singleton_collection: chromadb.Collection | None = None
-_singleton_model: SentenceTransformer | None = None
-_singleton_content: ContentList | None = None
-_singleton_reranker: CrossEncoder | None = None
-
-
-def get_retrieval_resources() -> (
-    tuple[chromadb.Collection, SentenceTransformer, ContentList, CrossEncoder]
-):
-    global _singleton_collection, _singleton_model, _singleton_content, _singleton_reranker
-
-    if _singleton_model is None:
-        print(f"[info] Loading embedding model {settings.embedding_model} …")
-        _singleton_model = SentenceTransformer(settings.embedding_model)
-
-    if _singleton_reranker is None:
-        print(f"[info] Loading reranker model {settings.reranker_model} …")
-        _singleton_reranker = CrossEncoder(settings.reranker_model)
-
-    if _singleton_collection is None:
-        client = chromadb.PersistentClient(path=settings.chroma_db_path)
-        _singleton_collection = client.get_collection(settings.collection_name)
-        print(f"[info] Connected to ChromaDB collection '{settings.collection_name}'")
-
-    if _singleton_content is None and settings.content_list_path.exists():
-        with open(settings.content_list_path, encoding="utf-8") as fh:
-            _singleton_content = json.load(fh)
-
-    return (
-        _singleton_collection,
-        _singleton_model,
-        _singleton_content or [],
-        _singleton_reranker,
-    )
-
-
-def query_documents(query: str, top_k: int | None = None) -> list[ResultChunk]:
-    collection, model, content, reranker = get_retrieval_resources()
-    return retrieve(query, collection, model, content, top_k=top_k, reranker=reranker)
+def _rerank_text(chunk: dict) -> str:
+    parts = [
+        (
+            f"{chunk['heading']}\n{chunk['text']}".strip()
+            if chunk["text"]
+            else chunk["heading"]
+        )
+    ]
+    for t in chunk.get("tables", []):
+        lines = [l for l in t.get("text", "").splitlines() if l.strip()]
+        col_headers = t.get("col_headers", "")
+        # If pandas assigned auto-integer headers (e.g. "0 | 1 | 2"), skip them
+        # and treat the first plain-text line as the header instead
+        if col_headers and all(p.strip().isdigit() for p in col_headers.split("|")):
+            col_headers = lines[0] if lines else ""
+            data_lines = lines[1:3]
+        else:
+            data_lines = lines[1:3]
+        digest = "\n".join(
+            p for p in [t.get("caption", ""), col_headers, "\n".join(data_lines)] if p
+        )
+        parts.append(digest.strip())
+    return "\n\n".join(p for p in parts if p)

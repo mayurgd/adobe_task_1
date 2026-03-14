@@ -208,4 +208,4 @@ __marimo__/
 
 data/docs/
 data/chroma_db/
-registry.json
+doc_registry.json
