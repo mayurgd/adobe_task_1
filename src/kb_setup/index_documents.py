@@ -14,7 +14,7 @@ import argparse
 import json
 from pathlib import Path
 from config import settings
-from doc_registry import collection_name_for, register
+from kb_setup.doc_registry import collection_name_for, register
 from kb_setup.chunker import build_chunks
 from kb_setup.indexer import build_index, load_embedding_model
 
