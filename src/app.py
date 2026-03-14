@@ -13,9 +13,15 @@ POST /ingest
 GET /status/{doc_id}
   Returns current indexing status: "processing" | "indexed" | "error"
 
-POST /ask
-  Vector-search over the single ChromaDB collection filtered to the
-  requested doc_ids, then call OpenAI for a grounded answer.
+POST /ask  (SSE streaming)
+  Streams agent progress events in real time:
+    data: {"type": "todos",     "todos": [...]}
+    data: {"type": "searching", "query": "..."}
+    data: {"type": "retrieved"}
+    data: {"type": "answer",    "answer": "...", "sources": [...]}
+    data: {"type": "error",     "message": "..."}
+  Falls back to a simple vector-search + OpenAI answer when the agent is
+  not configured (no TOOLS / deepagents available).
 """
 
 from __future__ import annotations
@@ -29,9 +35,9 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from fastapi.responses import FileResponse
 
 from config import settings
 from kb_setup.chunker import build_chunks
@@ -50,23 +56,22 @@ app.add_middleware(
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
 DOCS_INPUT_DIR = ROOT / "data" / "docs" / "inputs"
-DOCS_OUTPUT_DIR = Path(settings.mineru_output_dir)  # from .env: MINERU_OUTPUT_DIR
+DOCS_OUTPUT_DIR = Path(settings.mineru_output_dir)
 
 DOCS_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 DOCS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Global singletons (loaded once at startup) ─────────────────────────────────
+# ── Global singletons ──────────────────────────────────────────────────────────
 import chromadb  # noqa: E402
 
 _chroma_client: chromadb.PersistentClient | None = None
-_chroma_collection = None  # chromadb.Collection
-_embed_model = None  # SentenceTransformer
+_chroma_collection = None
+_embed_model = None
 
 COLLECTION_NAME = settings.collection_name
 
 
 def _get_collection():
-    """Return (or lazily create) the shared ChromaDB collection."""
     global _chroma_client, _chroma_collection
     if _chroma_collection is not None:
         return _chroma_collection
@@ -83,7 +88,6 @@ def _get_collection():
 
 @app.on_event("startup")
 async def _startup():
-    """Pre-load embedding model and open ChromaDB at server start."""
     global _embed_model
     print("[startup] Loading embedding model …")
     _embed_model = load_embedding_model()
@@ -93,9 +97,6 @@ async def _startup():
 
 
 # ── In-memory registries ───────────────────────────────────────────────────────
-# doc_registry : doc_id -> { name, path, pages }
-# job_status   : doc_id -> { status: "processing"|"indexed"|"error", message }
-
 doc_registry: dict[str, dict] = {}
 job_status: dict[str, dict] = {}
 
@@ -106,12 +107,12 @@ class IngestResponse(BaseModel):
     name: str
     pages: int
     path: str
-    status: str  # always "processing" on first response
+    status: str
 
 
 class StatusResponse(BaseModel):
     doc_id: str
-    status: str  # "processing" | "indexed" | "error"
+    status: str
     message: str
 
 
@@ -143,16 +144,8 @@ def _set_status(doc_id: str, status: str, message: str) -> None:
 
 
 def _run_pipeline(doc_id: str, file_path: Path) -> None:
-    """
-    Blocking function executed in FastAPI's thread-pool:
-      1. Run MinerU to parse the document.
-      2. Locate the output _content_list.json.
-      3. Chunk -> embed -> upsert into ChromaDB with doc_id metadata.
-    """
     try:
-        # ── Step 1: MinerU ────────────────────────────────────────────────────
         _set_status(doc_id, "processing", "Running MinerU parser …")
-
         cmd = [
             "mineru",
             "-p",
@@ -162,33 +155,19 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
             "-b",
             "pipeline",
         ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10-minute hard cap per document
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise RuntimeError(
-                f"MinerU exited {result.returncode}.\n"
-                f"stderr: {result.stderr[-800:]}"
+                f"MinerU exited {result.returncode}.\nstderr: {result.stderr[-800:]}"
             )
 
-        # ── Step 2: Locate content_list.json ──────────────────────────────────
-        # MinerU output convention:
-        #   <DOCS_OUTPUT_DIR>/<stem>/auto/<stem>_content_list.json
-        # The stem is derived from the *original* filename (without the doc_id prefix).
-        saved_stem = (
-            file_path.stem
-        )  # uses the uuid-prefixed filename MinerU actually saw
-
+        saved_stem = file_path.stem
         content_list_path = (
             DOCS_OUTPUT_DIR / saved_stem / "auto" / f"{saved_stem}_content_list.json"
         )
         if not content_list_path.exists():
             raise FileNotFoundError(f"MinerU output not found: {content_list_path}")
 
-        # ── Step 3: Chunk ─────────────────────────────────────────────────────
         _set_status(doc_id, "processing", "Chunking document …")
         with open(content_list_path, encoding="utf-8") as f:
             content = json.load(f)
@@ -199,13 +178,10 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
                 "No chunks produced — document may be empty or unreadable."
             )
 
-        # Inject doc_id into every chunk for collection-level filtering
         for c in chunks:
             c["doc_id"] = doc_id
 
-        # ── Step 4: Embed + upsert ────────────────────────────────────────────
         _set_status(doc_id, "processing", f"Embedding {len(chunks)} chunks …")
-
         embed_texts = [c["embed_text"] for c in chunks]
         embeddings = _embed_model.encode(
             embed_texts,
@@ -241,7 +217,6 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
             )
             _set_status(doc_id, "processing", f"Storing chunks … {end}/{len(chunks)}")
 
-        # Update page count from actual MinerU output
         all_pages = {p for c in chunks for p in c.get("pages", [])}
         if doc_id in doc_registry and all_pages:
             doc_registry[doc_id]["pages"] = max(all_pages) + 1
@@ -254,75 +229,26 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
         _set_status(doc_id, "error", str(exc)[:500])
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
+# ── /ask  — SSE streaming ──────────────────────────────────────────────────────
 
 
-@app.post("/ingest", response_model=IngestResponse)
-async def ingest(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-):
-    """
-    Save the uploaded file and kick off the background indexing pipeline.
-    Returns immediately with status='processing'.
-    """
-    allowed = {".pdf", ".docx", ".txt"}
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in allowed:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {suffix}",
-        )
-
-    doc_id = str(uuid.uuid4())
-    safe_name = f"{doc_id}_{file.filename}"
-    dest = DOCS_INPUT_DIR / safe_name
-
-    with dest.open("wb") as f_out:
-        shutil.copyfileobj(file.file, f_out)
-
-    # Best-effort page count up front; updated after MinerU finishes
-    pages = _get_page_count(dest, suffix)
-
-    doc_registry[doc_id] = {
-        "name": file.filename,
-        "path": dest,
-        "pages": pages,
-    }
-    _set_status(doc_id, "processing", "Queued for indexing …")
-
-    # Add to FastAPI's background task queue (runs in thread pool)
-    background_tasks.add_task(_run_pipeline, doc_id, dest)
-
-    return IngestResponse(
-        doc_id=doc_id,
-        name=file.filename,
-        pages=pages,
-        path=str(dest.relative_to(ROOT)),
-        status="processing",
-    )
+def _sse(payload: dict) -> str:
+    """Serialise a dict as an SSE data line."""
+    return f"data: {json.dumps(payload)}\n\n"
 
 
-@app.get("/status/{doc_id}", response_model=StatusResponse)
-async def get_status(doc_id: str):
-    """Poll to track per-document indexing progress."""
-    if doc_id not in job_status:
-        raise HTTPException(status_code=404, detail=f"Unknown doc_id: {doc_id}")
-    s = job_status[doc_id]
-    return StatusResponse(
-        doc_id=doc_id,
-        status=s["status"],
-        message=s["message"],
-    )
-
-
-@app.post("/ask", response_model=AskResponse)
+@app.post("/ask")
 async def ask(body: AskRequest):
     """
-    Embed the question, retrieve top-k chunks from ChromaDB filtered to
-    body.doc_ids, then generate an answer via OpenAI.
+    Stream agent progress + final answer as Server-Sent Events.
+
+    Event shapes:
+        {"type": "todos",     "todos": [{"title": str, "status": str}, …]}
+        {"type": "searching", "query": str}
+        {"type": "retrieved"}
+        {"type": "answer",    "answer": str, "sources": [...]}
+        {"type": "error",     "message": str}
     """
-    # Guard: only query fully-indexed docs
     not_ready = [
         d for d in body.doc_ids if job_status.get(d, {}).get("status") != "indexed"
     ]
@@ -331,24 +257,87 @@ async def ask(body: AskRequest):
             status_code=400,
             detail=f"Docs not yet indexed: {not_ready}",
         )
-
     if not body.question.strip():
         raise HTTPException(status_code=400, detail="Question must not be empty.")
 
-    # Embed question
-    q_embedding = _embed_model.encode(
-        body.question,
-        normalize_embeddings=True,
-    ).tolist()
+    async def event_stream():
+        q: asyncio.Queue[dict | None] = asyncio.Queue()
 
-    # Retrieve from ChromaDB, filtered to selected docs
+        # ── Try agent path first (requires deepagents + tools) ─────────────
+        try:
+            from agent import SYSTEM_PROMPT
+            from deepagents import create_deep_agent
+            from langchain_openai import ChatOpenAI
+            from tools import TOOLS
+            from streaming import stream_agent_turn
+
+            llm = ChatOpenAI(model=settings.openai_model, temperature=0)
+            agent = create_deep_agent(
+                tools=TOOLS,
+                system_prompt=SYSTEM_PROMPT,
+                model=llm,
+            )
+
+            conversation = [{"role": "user", "content": body.question}]
+
+            async def _run_agent():
+                try:
+                    reply = await stream_agent_turn(agent, conversation, event_queue=q)
+                    # Build source refs from the last ChromaDB query
+                    sources = await asyncio.to_thread(_get_sources, body)
+                    await q.put({"type": "answer", "answer": reply, "sources": sources})
+                except Exception as exc:
+                    await q.put({"type": "error", "message": str(exc)})
+                finally:
+                    await q.put(None)  # sentinel
+
+            asyncio.create_task(_run_agent())
+
+            while True:
+                event = await q.get()
+                if event is None:
+                    break
+                yield _sse(event)
+
+        except ImportError:
+            # ── Fallback: plain vector-search + OpenAI (no agent) ──────────
+            yield _sse({"type": "searching", "query": body.question})
+            try:
+                answer_data = await _plain_rag(body)
+                yield _sse({"type": "retrieved"})
+                yield _sse(
+                    {
+                        "type": "answer",
+                        "answer": answer_data["answer"],
+                        "sources": answer_data["sources"],
+                    }
+                )
+            except Exception as exc:
+                yield _sse({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+        },
+    )
+
+
+# ── Plain RAG helper (fallback when agent not available) ──────────────────────
+
+
+async def _plain_rag(body: AskRequest) -> dict:
+    """Embed → retrieve → OpenAI. Returns {answer, sources}."""
+    q_embedding = _embed_model.encode(body.question, normalize_embeddings=True).tolist()
+
     collection = _get_collection()
     where_filter = (
         {"doc_id": {"$in": body.doc_ids}}
         if len(body.doc_ids) > 1
         else {"doc_id": body.doc_ids[0]}
     )
-
     top_k = min(settings.default_top_k, collection.count() or 1)
     results = collection.query(
         query_embeddings=[q_embedding],
@@ -356,32 +345,28 @@ async def ask(body: AskRequest):
         where=where_filter,
         include=["metadatas", "documents", "distances"],
     )
-
     metadatas = results["metadatas"][0]
     documents = results["documents"][0]
 
     if not metadatas:
-        return AskResponse(
-            answer="No relevant content found in the selected documents.",
-            sources=[],
-        )
+        return {
+            "answer": "No relevant content found in the selected documents.",
+            "sources": [],
+        }
 
-    # Build LLM context
     context_parts = []
     for i, (meta, doc_text) in enumerate(zip(metadatas, documents)):
         pages = json.loads(meta.get("pages", "[0]"))
-        page_str = ", ".join(str(p + 1) for p in pages)  # 1-indexed
+        page_str = ", ".join(str(p + 1) for p in pages)
         context_parts.append(
             f"[Chunk {i+1} | doc={meta['doc_id'][:8]} | page(s)={page_str}]\n"
             f"{meta.get('text') or doc_text}"
         )
     context = "\n\n---\n\n".join(context_parts)
 
-    # Call OpenAI
-    import openai  # lazy import
+    import openai
 
     openai.api_key = settings.openai_api_key
-
     response = await asyncio.to_thread(
         lambda: openai.chat.completions.create(
             model=settings.openai_model,
@@ -390,7 +375,7 @@ async def ask(body: AskRequest):
                     "role": "system",
                     "content": (
                         "You are an expert document analyst. "
-                        "Answer the user's question using ONLY the retrieved context. "
+                        "Answer using ONLY the retrieved context. "
                         "Cite chunk numbers like [Chunk 1] when you use them. "
                         "If the answer isn't in the context, say so clearly."
                     ),
@@ -405,27 +390,89 @@ async def ask(body: AskRequest):
         )
     )
     answer = response.choices[0].message.content.strip()
+    sources = _build_source_refs(metadatas)
+    return {"answer": answer, "sources": sources}
 
-    # Build source refs
-    sources: list[SourceRef] = []
+
+def _get_sources(body: AskRequest) -> list[dict]:
+    """Re-run a quick retrieval to get source refs for the agent path."""
+    try:
+        q_emb = _embed_model.encode(body.question, normalize_embeddings=True).tolist()
+        collection = _get_collection()
+        where_filter = (
+            {"doc_id": {"$in": body.doc_ids}}
+            if len(body.doc_ids) > 1
+            else {"doc_id": body.doc_ids[0]}
+        )
+        top_k = min(settings.default_top_k, collection.count() or 1)
+        results = collection.query(
+            query_embeddings=[q_emb],
+            n_results=top_k,
+            where=where_filter,
+            include=["metadatas"],
+        )
+        return _build_source_refs(results["metadatas"][0])
+    except Exception:
+        return []
+
+
+def _build_source_refs(metadatas: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
+    refs = []
     for meta in metadatas:
         pages = json.loads(meta.get("pages", "[0]"))
         page = pages[0] + 1 if pages else 1
-        doc_name = doc_registry.get(meta["doc_id"], {}).get("name", meta["doc_id"][:8])
-        sources.append(
-            SourceRef(
-                doc_id=meta["doc_id"],
-                page=page,
-                label=f"{doc_name} p.{page}",
-            )
-        )
+        doc_id = meta["doc_id"]
+        key = (doc_id, page)
+        if key in seen:
+            continue
+        seen.add(key)
+        doc_name = doc_registry.get(doc_id, {}).get("name", doc_id[:8])
+        refs.append({"doc_id": doc_id, "page": page, "label": f"{doc_name} p.{page}"})
+    return refs
 
-    return AskResponse(answer=answer, sources=sources)
+
+# ── Other endpoints ────────────────────────────────────────────────────────────
+
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    allowed = {".pdf", ".docx", ".txt"}
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+
+    doc_id = str(uuid.uuid4())
+    safe_name = f"{doc_id}_{file.filename}"
+    dest = DOCS_INPUT_DIR / safe_name
+
+    with dest.open("wb") as f_out:
+        shutil.copyfileobj(file.file, f_out)
+
+    pages = _get_page_count(dest, suffix)
+    doc_registry[doc_id] = {"name": file.filename, "path": dest, "pages": pages}
+    _set_status(doc_id, "processing", "Queued for indexing …")
+    background_tasks.add_task(_run_pipeline, doc_id, dest)
+
+    return IngestResponse(
+        doc_id=doc_id,
+        name=file.filename,
+        pages=pages,
+        path=str(dest.relative_to(ROOT)),
+        status="processing",
+    )
+
+
+@app.get("/status/{doc_id}", response_model=StatusResponse)
+async def get_status(doc_id: str):
+    if doc_id not in job_status:
+        raise HTTPException(status_code=404, detail=f"Unknown doc_id: {doc_id}")
+    s = job_status[doc_id]
+    return StatusResponse(doc_id=doc_id, status=s["status"], message=s["message"])
 
 
 @app.get("/docs-list")
 async def list_docs():
-    """All registered documents with their current indexing status."""
     return [
         {
             "doc_id": k,
@@ -440,8 +487,6 @@ async def list_docs():
 
 @app.get("/file/{doc_id}")
 async def get_file(doc_id: str):
-    """Serve the original uploaded file so the frontend PDF viewer can
-    re-render it after a page refresh (when in-memory bytes are gone)."""
     if doc_id not in doc_registry:
         raise HTTPException(status_code=404, detail=f"Unknown doc_id: {doc_id}")
     entry = doc_registry[doc_id]
@@ -449,8 +494,7 @@ async def get_file(doc_id: str):
     name = entry["name"]
     if not path.exists():
         raise HTTPException(
-            status_code=404,
-            detail=f"File not found on disk: {path.name}",
+            status_code=404, detail=f"File not found on disk: {path.name}"
         )
     return FileResponse(
         path=str(path),
@@ -468,7 +512,6 @@ async def health():
     }
 
 
-# Serve frontend from the same directory
 app.mount("/", StaticFiles(directory=str(ROOT), html=True), name="static")
 
 
@@ -476,7 +519,6 @@ app.mount("/", StaticFiles(directory=str(ROOT), html=True), name="static")
 
 
 def _get_page_count(path: Path, suffix: str) -> int:
-    """Best-effort page count from a PDF. Returns 1 on failure."""
     if suffix == ".pdf":
         try:
             from pypdf import PdfReader
@@ -487,7 +529,6 @@ def _get_page_count(path: Path, suffix: str) -> int:
     return 1
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
 

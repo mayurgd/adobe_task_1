@@ -128,13 +128,67 @@
     .src-tag{font-size:10px;padding:2px 8px;border-radius:5px;background:var(--bg-secondary);border:0.5px solid var(--border);color:var(--text-secondary);cursor:pointer;transition:border-color 0.12s,color 0.12s;}
     .src-tag:hover{border-color:var(--accent-bd);color:var(--accent);}
     .msg-time{font-size:9.5px;color:var(--text-hint);}
-    .typing{display:none;padding:0;}
-    .typing.show{display:flex;gap:8px;}
-    .typing-bub{padding:11px 14px;border-radius:3px 11px 11px 11px;background:var(--bg-secondary);border:0.5px solid var(--border);display:flex;gap:4px;align-items:center;}
-    .dot{width:5px;height:5px;border-radius:50%;background:var(--text-hint);animation:bounce 1.3s infinite;}
-    .dot:nth-child(2){animation-delay:0.18s;}
-    .dot:nth-child(3){animation-delay:0.36s;}
-    @keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-5px)}}
+
+    /* ── Agent status panel ── */
+    .agent-status-panel{
+      display:flex;flex-direction:column;gap:0;
+      border:0.5px solid var(--border);border-radius:var(--r-lg);
+      background:var(--bg-secondary);overflow:hidden;
+      font-size:11.5px;
+    }
+    .asp-header{
+      display:flex;align-items:center;gap:7px;
+      padding:8px 11px;
+      border-bottom:0.5px solid var(--border);
+      background:var(--bg-primary);
+      cursor:pointer;user-select:none;
+    }
+    .asp-header-icon{
+      width:18px;height:18px;border-radius:4px;
+      background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;
+    }
+    .asp-header-icon svg{width:10px;height:10px;}
+    .asp-header-title{font-size:11.5px;font-weight:500;flex:1;color:var(--text-primary);}
+    .asp-header-status{font-size:10px;color:var(--text-secondary);}
+    .asp-chevron{font-size:9px;color:var(--text-hint);transition:transform 0.18s;}
+    .asp-chevron.open{transform:rotate(180deg);}
+    .asp-body{padding:8px 11px;display:flex;flex-direction:column;gap:6px;}
+    .asp-body.collapsed{display:none;}
+
+    /* todo row */
+    .asp-todo{
+      display:flex;align-items:flex-start;gap:7px;
+      padding:5px 8px;border-radius:var(--r-sm);
+      background:var(--bg-primary);border:0.5px solid var(--border);
+      transition:border-color 0.15s,background 0.15s;
+    }
+    .asp-todo.done{background:var(--green-bg);border-color:var(--green-bd);}
+    .asp-todo.active{background:var(--accent-bg);border-color:var(--accent-bd);}
+    .asp-todo-icon{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;transition:all 0.2s;}
+    .asp-todo.done .asp-todo-icon{background:var(--green);border-color:var(--green);color:white;}
+    .asp-todo.active .asp-todo-icon{border-color:var(--accent);background:var(--accent-bg);}
+    .asp-todo-check{font-size:8px;color:white;display:none;}
+    .asp-todo.done .asp-todo-check{display:block;}
+    .asp-todo-spinner{display:none;}
+    .asp-todo.active .asp-todo-spinner{display:block;}
+    .asp-todo-text{font-size:11.5px;color:var(--text-secondary);line-height:1.4;flex:1;padding-top:1px;}
+    .asp-todo.done .asp-todo-text{color:var(--green);text-decoration:line-through;text-decoration-color:rgba(59,109,17,0.4);}
+    .asp-todo.active .asp-todo-text{color:var(--accent);font-weight:500;}
+
+    /* search row */
+    .asp-search{
+      display:flex;align-items:center;gap:7px;
+      padding:5px 8px;border-radius:var(--r-sm);
+      background:var(--accent-bg);border:0.5px solid var(--accent-bd);
+    }
+    .asp-search-icon{font-size:11px;flex-shrink:0;}
+    .asp-search-text{font-size:11px;color:var(--accent);flex:1;font-style:italic;
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .asp-search.done{background:var(--green-bg);border-color:var(--green-bd);}
+    .asp-search.done .asp-search-text{color:var(--green);font-style:normal;}
+
+    /* ── end agent status panel ── */
+
     .input-area{padding:10px 14px 14px;border-top:0.5px solid var(--border);flex-shrink:0;}
     .input-row{display:flex;align-items:flex-end;gap:7px;border:0.5px solid var(--border-md);border-radius:var(--r-lg);padding:7px 8px;background:var(--bg-secondary);transition:border-color 0.15s;}
     .input-row:focus-within{border-color:var(--accent);}
@@ -224,10 +278,6 @@
           <p>Upload documents first,<br>then ask questions<br>about your pdf.</p>
         </div>
       </div>
-      <div class="typing" id="typingIndicator">
-        <div class="msg-av ai">AI</div>
-        <div class="typing-bub"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
-      </div>
       <div class="input-area">
         <div class="input-row">
           <textarea id="questionInput" rows="1" placeholder="Upload documents to start asking questions…" onkeydown="handleKey(event)" oninput="autoResize(this)" disabled></textarea>
@@ -302,32 +352,23 @@ function startPolling(docId){
 async function fetchAndLoadPdf(docId){
   const doc=docs[docId];
   if(!doc||(doc.name||'').toLowerCase().indexOf('.pdf')===-1)return;
-
   const area=$('pdfScrollArea');
   area.innerHTML=`<div class="pdf-loading"><div class="bigspin"></div><p>Loading ${doc.name}…</p></div>`;
-
   try{
     const res=await fetch(`${FILE_URL}/${docId}`);
     if(!res.ok)throw new Error('status '+res.status);
     const ab=await res.arrayBuffer();
     const pdfDoc=await pdfjsLib.getDocument({data:ab}).promise;
-    doc.pdfDoc=pdfDoc;
-    doc.pages=pdfDoc.numPages;
-    updatePageLabel();
-    renderAllPages();
-  }catch(e){
-    console.warn('[viewer] fetch failed:',e);
-    showFallbackPlaceholder(doc);
-  }
+    doc.pdfDoc=pdfDoc;doc.pages=pdfDoc.numPages;
+    updatePageLabel();renderAllPages();
+  }catch(e){console.warn('[viewer] fetch failed:',e);showFallbackPlaceholder(doc);}
 }
 
 /* ── SESSION REHYDRATION ── */
 async function rehydrateDocs(){
-  const banner=$('rehydrateBanner');
-  banner.classList.add('show');
+  const banner=$('rehydrateBanner');banner.classList.add('show');
   try{
-    const res=await fetch(DOCS_LIST_URL);
-    if(!res.ok)throw new Error('docs-list '+res.status);
+    const res=await fetch(DOCS_LIST_URL);if(!res.ok)throw new Error('docs-list '+res.status);
     const list=await res.json();
     if(list.length===0){banner.classList.remove('show');updateStatus();return;}
     $('rehydrateMsg').textContent=`Restoring ${list.length} document${list.length>1?'s':''}…`;
@@ -343,10 +384,7 @@ async function rehydrateDocs(){
       if(!firstDocId)firstDocId=doc_id;
     }
     updateStatus();
-    if(firstDocId){
-      const el=document.querySelector(`.doc-item[data-doc="${firstDocId}"]`);
-      if(el)selectDocEl(el);
-    }
+    if(firstDocId){const el=document.querySelector(`.doc-item[data-doc="${firstDocId}"]`);if(el)selectDocEl(el);}
   }catch(e){console.warn('[rehydrate]',e);}
   finally{banner.classList.remove('show');}
 }
@@ -355,8 +393,7 @@ async function rehydrateDocs(){
 function handleUpload(files){
   Array.from(files).forEach(async file=>{
     const tempId='tmp_'+Date.now()+'_'+Math.random().toString(36).slice(2,5);
-    const kb=Math.round(file.size/1024);
-    const sz=kb>1024?(kb/1024).toFixed(1)+' MB':kb+' KB';
+    const kb=Math.round(file.size/1024);const sz=kb>1024?(kb/1024).toFixed(1)+' MB':kb+' KB';
     const ext=file.name.split('.').pop().toUpperCase();
     docs[tempId]={name:file.name,pages:1,pdfDoc:null,indexStatus:'processing',pollTimer:null};
     addDocToList(tempId,file.name,sz,ext);
@@ -378,19 +415,11 @@ function handleUpload(files){
       console.error(e);docs[tempId].indexStatus='error';docs[tempId].errorMessage=String(e);
       setBadge(tempId,'error');updateStatus();return;
     }
-    // Load PDF from the File object directly (freshly uploaded — bytes available)
     if(file.type==='application/pdf'||file.name.endsWith('.pdf')){
-      try{
-        const ab=await file.arrayBuffer();
-        const pd=await pdfjsLib.getDocument({data:ab}).promise;
-        docs[finalId].pdfDoc=pd;docs[finalId].pages=pd.numPages;
-      }catch(e){}
+      try{const ab=await file.arrayBuffer();const pd=await pdfjsLib.getDocument({data:ab}).promise;docs[finalId].pdfDoc=pd;docs[finalId].pages=pd.numPages;}catch(e){}
     }
     startPolling(finalId);updateStatus();
-    if(Object.keys(docs).length===1){
-      const el=document.querySelector(`.doc-item[data-doc="${finalId}"]`);
-      if(el)selectDocEl(el);
-    }
+    if(Object.keys(docs).length===1){const el=document.querySelector(`.doc-item[data-doc="${finalId}"]`);if(el)selectDocEl(el);}
   });
 }
 
@@ -411,10 +440,8 @@ zone.addEventListener('drop',e=>{e.preventDefault();zone.style.borderColor='';ha
 function selectDocEl(el){
   document.querySelectorAll('.doc-item').forEach(d=>d.classList.remove('active'));
   el.classList.add('active');
-  const newId=el.dataset.doc;
-  const changed=newId!==activeDocId;
-  activeDocId=newId;currentPage=1;
-  openViewer(changed);
+  const newId=el.dataset.doc;const changed=newId!==activeDocId;
+  activeDocId=newId;currentPage=1;openViewer(changed);
 }
 
 function openViewer(needsFetch=false){
@@ -423,23 +450,17 @@ function openViewer(needsFetch=false){
   const nm=$('pdfDocName');nm.textContent=doc.name;nm.className='pdf-doc-name has-doc';
   $('btnPrev').disabled=false;$('btnNext').disabled=false;
   updatePageLabel();
-  // If no pdfDoc yet, fetch from backend; otherwise render what we have
-  if(!doc.pdfDoc&&(doc.name||'').toLowerCase().endsWith('.pdf')&&needsFetch){
-    fetchAndLoadPdf(activeDocId);
-  } else {
-    renderAllPages();
-  }
+  if(!doc.pdfDoc&&(doc.name||'').toLowerCase().endsWith('.pdf')&&needsFetch){fetchAndLoadPdf(activeDocId);}
+  else{renderAllPages();}
 }
 
 function updatePageLabel(){
-  const doc=docs[activeDocId];
-  $('pageLabel').textContent=doc?`${currentPage} / ${doc.pages}`:'—';
+  const doc=docs[activeDocId];$('pageLabel').textContent=doc?`${currentPage} / ${doc.pages}`:'—';
 }
 
 function showFallbackPlaceholder(doc){
   const area=$('pdfScrollArea');area.innerHTML='';
-  const wrap=document.createElement('div');
-  wrap.className='pdf-page-wrap';wrap.id='pdfPage_1';
+  const wrap=document.createElement('div');wrap.className='pdf-page-wrap';wrap.id='pdfPage_1';
   wrap.style.cssText=`width:${Math.round(560*zoomLevel/100)}px;min-height:${Math.round(400*zoomLevel/100)}px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px`;
   wrap.innerHTML=`<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><p style="font-size:12px;color:#bbb">${doc.name}</p><p style="font-size:11px;color:#ccc">Preview not available</p>`;
   area.appendChild(wrap);
@@ -451,24 +472,19 @@ async function renderAllPages(){
   if(doc.pdfDoc){
     const scale=zoomLevel/100;
     for(let p=1;p<=Math.min(doc.pages,30);p++){
-      const wrap=document.createElement('div');
-      wrap.className='pdf-page-wrap';wrap.id='pdfPage_'+p;
+      const wrap=document.createElement('div');wrap.className='pdf-page-wrap';wrap.id='pdfPage_'+p;
       const canvas=document.createElement('canvas');
-      const numBar=document.createElement('div');
-      numBar.className='pdf-page-num-bar';numBar.textContent=`— ${p} —`;
+      const numBar=document.createElement('div');numBar.className='pdf-page-num-bar';numBar.textContent=`— ${p} —`;
       wrap.appendChild(canvas);wrap.appendChild(numBar);area.appendChild(wrap);
       (async(pn,c)=>{
         try{
-          const page=await doc.pdfDoc.getPage(pn);
-          const vp=page.getViewport({scale});
+          const page=await doc.pdfDoc.getPage(pn);const vp=page.getViewport({scale});
           c.width=vp.width;c.height=vp.height;
           await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
         }catch(e){}
       })(p,canvas);
     }
-  } else {
-    showFallbackPlaceholder(doc);
-  }
+  } else {showFallbackPlaceholder(doc);}
   scrollToPage(currentPage);
 }
 
@@ -490,8 +506,128 @@ function openSource(s){
   setTimeout(()=>pulsePageWrap(s.page||1),changed&&!docs[s.doc_id]?.pdfDoc?1200:500);
 }
 
-/* ── CHAT ── */
-function addMessage(role,html,sources){
+/* ══════════════════════════════════════════════════
+   AGENT STATUS PANEL
+   ══════════════════════════════════════════════════ */
+
+// State for the live panel injected into the chat while the agent runs.
+let _livePanelEl = null;      // the .agent-status-panel DOM node
+let _liveTodos   = [];        // [{title, status}] — latest snapshot
+let _searchItems = [];        // [{query, done}]
+let _panelOpen   = true;      // expand/collapse state
+
+function _createLivePanel() {
+  const panel = document.createElement('div');
+  panel.className = 'msg ai';
+  panel.innerHTML = `
+    <div class="msg-av ai">AI</div>
+    <div class="msg-col" style="max-width:92%;width:100%">
+      <div class="agent-status-panel" id="liveAspPanel">
+        <div class="asp-header" id="aspToggle">
+          <div class="asp-header-icon">
+            <svg viewBox="0 0 12 12" fill="none" stroke="var(--accent)" stroke-width="1.5">
+              <circle cx="6" cy="6" r="4.5"/><line x1="6" y1="3.5" x2="6" y2="6.5"/>
+              <line x1="6" y1="7.5" x2="6" y2="8.5"/>
+            </svg>
+          </div>
+          <span class="asp-header-title">Agent is working…</span>
+          <span class="asp-header-status" id="aspHeaderStatus"></span>
+          <span class="asp-chevron open" id="aspChevron">▾</span>
+        </div>
+        <div class="asp-body" id="aspBody"></div>
+      </div>
+    </div>`;
+
+  // toggle expand/collapse
+  panel.querySelector('#aspToggle').onclick = () => {
+    _panelOpen = !_panelOpen;
+    panel.querySelector('#aspBody').classList.toggle('collapsed', !_panelOpen);
+    panel.querySelector('#aspChevron').classList.toggle('open', _panelOpen);
+  };
+
+  const ce = $('chatEmpty'); if (ce) ce.remove();
+  $('chatMessages').appendChild(panel);
+  scrollBottom();
+  _livePanelEl = panel;
+  _liveTodos   = [];
+  _searchItems = [];
+  _panelOpen   = true;
+}
+
+function _renderLivePanel() {
+  if (!_livePanelEl) return;
+  const body = _livePanelEl.querySelector('#aspBody');
+  if (!body) return;
+
+  // Find the "active" todo (first pending/in-progress)
+  const activeIdx = _liveTodos.findIndex(t =>
+    !['completed','done'].includes(t.status)
+  );
+
+  // Build todo rows
+  const todoHTML = _liveTodos.map((t, i) => {
+    const isDone = ['completed','done'].includes(t.status);
+    const isActive = !isDone && i === activeIdx;
+    const cls = isDone ? 'done' : isActive ? 'active' : '';
+    return `
+      <div class="asp-todo ${cls}">
+        <div class="asp-todo-icon">
+          <span class="asp-todo-check">✓</span>
+          ${isActive ? '<span class="asp-todo-spinner spin"></span>' : ''}
+        </div>
+        <span class="asp-todo-text">${_escHtml(t.title)}</span>
+      </div>`;
+  }).join('');
+
+  // Build search rows
+  const searchHTML = _searchItems.map(s => `
+    <div class="asp-search ${s.done ? 'done' : ''}">
+      <span class="asp-search-icon">${s.done ? '✓' : '🔍'}</span>
+      <span class="asp-search-text">${s.done ? 'Retrieved: ' : 'Searching: '}"${_escHtml(s.query)}"</span>
+    </div>`).join('');
+
+  body.innerHTML = todoHTML + searchHTML;
+  scrollBottom();
+}
+
+function _updatePanelTitle(title) {
+  if (!_livePanelEl) return;
+  const el = _livePanelEl.querySelector('.asp-header-title');
+  if (el) el.textContent = title;
+}
+
+function _finalizeLivePanel(answer, sources) {
+  if (!_livePanelEl) return;
+  const panel = _livePanelEl;
+
+  // Collapse the status panel and mark it done
+  const header = panel.querySelector('.asp-header-title');
+  if (header) header.textContent = 'Agent completed';
+  const chevron = panel.querySelector('.asp-chevron');
+  if (chevron) {chevron.classList.remove('open'); _panelOpen = false;}
+  const body = panel.querySelector('#aspBody');
+  if (body) body.classList.add('collapsed');
+
+  // Mark all todos done visually
+  if (_liveTodos.length) {
+    _liveTodos = _liveTodos.map(t => ({...t, status:'completed'}));
+    body.classList.remove('collapsed'); _renderLivePanel(); body.classList.add('collapsed');
+  }
+
+  _livePanelEl = null;
+
+  // Append the actual answer as a normal AI message
+  addMessage('ai', answer, sources);
+}
+
+function _escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+/* ── CHAT MESSAGES ── */
+function addMessage(role, html, sources) {
   const ce=$('chatEmpty');if(ce)ce.remove();
   const c=$('chatMessages'),div=document.createElement('div');
   div.className='msg '+role;
@@ -501,25 +637,112 @@ function addMessage(role,html,sources){
   c.appendChild(div);scrollBottom();
 }
 
-async function sendQuestion(){
-  if(isLoading)return;
-  const input=$('questionInput'),q=input.value.trim();
-  if(!q)return;
-  const ready=indexedIds();if(ready.length===0)return;
-  input.value='';autoResize(input);
-  addMessage('user',q,null);
-  isLoading=true;
-  const typing=$('typingIndicator');typing.classList.add('show');scrollBottom();
-  try{
-    const res=await fetch(BACKEND_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,doc_ids:ready})});
-    if(!res.ok)throw new Error('Server '+res.status);
-    const data=await res.json();
-    typing.classList.remove('show');
-    addMessage('ai',data.answer,data.sources||[]);
-  }catch(err){
-    typing.classList.remove('show');
-    addMessage('ai',`<span style="color:var(--text-secondary)">Could not reach backend at <code style="font-size:11px">${BACKEND_URL}</code>.<br>Is the FastAPI server running?</span>`,[]);
-  }finally{isLoading=false;}
+/* ── SEND (SSE) ── */
+async function sendQuestion() {
+  if (isLoading) return;
+  const input = $('questionInput'), q = input.value.trim();
+  if (!q) return;
+  const ready = indexedIds(); if (ready.length === 0) return;
+
+  input.value = ''; autoResize(input);
+  addMessage('user', q, null);
+
+  isLoading = true;
+  const btn = $('sendBtn');
+  btn.disabled = true; btn.style.opacity = '0.5';
+
+  // Create the live panel immediately
+  _createLivePanel();
+  _updatePanelTitle('Agent is thinking…');
+
+  try {
+    const res = await fetch(BACKEND_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, doc_ids: ready }),
+    });
+
+    if (!res.ok) throw new Error('Server ' + res.status);
+    if (!res.body) throw new Error('No response body');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // SSE lines end with \n\n
+      const parts = buf.split('\n\n');
+      buf = parts.pop(); // keep incomplete tail
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+        _handleAgentEvent(evt, q);
+      }
+    }
+
+  } catch (err) {
+    // Replace live panel with error
+    if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
+    addMessage('ai',
+      `<span style="color:var(--text-secondary)">Could not reach backend at <code style="font-size:11px">${BACKEND_URL}</code>.<br>Is the FastAPI server running?</span>`,
+      []);
+  } finally {
+    isLoading = false;
+    btn.disabled = false; btn.style.opacity = '1';
+  }
+}
+
+function _handleAgentEvent(evt, question) {
+  switch (evt.type) {
+
+    case 'todos': {
+      // Merge latest snapshot: preserve existing statuses, add new items
+      const incoming = evt.todos || [];
+      _liveTodos = incoming.map((t, i) => {
+        const existing = _liveTodos[i];
+        return existing ? { ...t, status: t.status || existing.status } : t;
+      });
+      _updatePanelTitle('Planning…');
+      _renderLivePanel();
+      break;
+    }
+
+    case 'searching': {
+      _updatePanelTitle('Searching documents…');
+      _searchItems.push({ query: evt.query, done: false });
+      _renderLivePanel();
+      break;
+    }
+
+    case 'retrieved': {
+      // Mark last unfinished search as done
+      const last = [..._searchItems].reverse().find(s => !s.done);
+      if (last) last.done = true;
+      _updatePanelTitle('Generating answer…');
+      _renderLivePanel();
+      break;
+    }
+
+    case 'answer': {
+      _finalizeLivePanel(evt.answer || '', evt.sources || []);
+      break;
+    }
+
+    case 'error': {
+      if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
+      addMessage('ai',
+        `<span style="color:#993C1D">⚠ ${_escHtml(evt.message || 'Unknown error')}</span>`,
+        []);
+      break;
+    }
+  }
 }
 
 function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendQuestion();}}
