@@ -8,17 +8,18 @@ Uses pydantic-settings for automatic env var loading, type validation,
 and fail-fast errors on missing required fields.
 
 Usage:
-    from config import settings
+    from src.config import settings
     print(settings.openai_model)
     print(settings.chroma_db_path)
 
 Install:
-    pip install pydantic-settings
+    pip install pydantic-settings python-dotenv
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
 from dotenv import load_dotenv
 from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,8 +46,14 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
 
     # ── ChromaDB / embedding ──────────────────────────────────────────────────
-    collection_name: str = "adbe_2023_annual_report"
+    collection_name: str = "leadership_insight_docs"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
+
+    # ── MinerU ────────────────────────────────────────────────────────────────
+    # Base output directory for MinerU.
+    # MinerU writes:  <mineru_output_dir>/<pdf_stem>/auto/<pdf_stem>_content_list.json
+    # Example .env:   MINERU_OUTPUT_DIR=/Users/mayurgd/.../data/outputs/annual_reports
+    mineru_output_dir: str = str(_REPO_ROOT / "data" / "docs" / "outputs")
 
     # ── Chunking ──────────────────────────────────────────────────────────────
     min_text_length: int = 30  # minimum chars for a text chunk to be indexed
@@ -58,28 +65,10 @@ class Settings(BaseSettings):
     embed_batch_size: int = 64
 
     # ── Derived fields (computed from repo root — not env vars) ───────────────
-    # These use @computed_field so Pydantic includes them in .model_dump() etc.
-    # but they are never read from the environment.
-
     @computed_field
     @property
     def repo_root(self) -> Path:
         return _REPO_ROOT
-
-    @computed_field
-    @property
-    def content_list_path(self) -> Path:
-        return (
-            _REPO_ROOT
-            / "data/outputs/annual_reports/adbe-2023-annual-report/auto"
-            / "adbe-2023-annual-report_content_list.json"
-        )
-
-    @computed_field
-    @property
-    def images_base_dir(self) -> Path:
-        """Directory where MinerU stores extracted images (sibling of the JSON)."""
-        return self.content_list_path.parent / "images"
 
     @computed_field
     @property
@@ -94,7 +83,6 @@ class Settings(BaseSettings):
     # ── Startup validation ────────────────────────────────────────────────────
     @model_validator(mode="after")
     def _warn_if_tracing_incomplete(self) -> "Settings":
-        """Warn if only one of the two Langfuse keys is set (likely a misconfiguration)."""
         keys = (self.langfuse_public_key, self.langfuse_secret_key)
         if any(keys) and not all(keys):
             import warnings
@@ -107,7 +95,5 @@ class Settings(BaseSettings):
         return self
 
 
-# Module-level singleton — import this everywhere
-# Pydantic raises ValidationError here if OPENAI_API_KEY is missing,
-# which stops the process immediately with a clear message.
+# Module-level singleton
 settings = Settings()
