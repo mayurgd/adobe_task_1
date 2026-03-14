@@ -61,6 +61,9 @@ DOCS_OUTPUT_DIR = Path(settings.mineru_output_dir)
 DOCS_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 DOCS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Registry persistence path ──────────────────────────────────────────────────
+REGISTRY_PATH = ROOT / "data" / "registry.json"
+
 # ── Global singletons ──────────────────────────────────────────────────────────
 import chromadb  # noqa: E402
 
@@ -86,9 +89,65 @@ def _get_collection():
     return _chroma_collection
 
 
+# ── Registry persistence helpers ───────────────────────────────────────────────
+
+
+def _load_registry() -> None:
+    """Load doc_registry and job_status from disk on startup."""
+    global doc_registry, job_status
+    if not REGISTRY_PATH.exists():
+        return
+    try:
+        with open(REGISTRY_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        raw_registry: dict = data.get("doc_registry", {})
+        raw_status: dict = data.get("job_status", {})
+
+        for doc_id, entry in raw_registry.items():
+            # Restore path as a Path object; verify the file still exists
+            path = Path(entry["path"])
+            if not path.exists():
+                # File was deleted from disk — skip this entry
+                print(f"[registry] Skipping {doc_id[:8]}: file missing at {path}")
+                continue
+            doc_registry[doc_id] = {**entry, "path": path}
+            job_status[doc_id] = raw_status.get(
+                doc_id, {"status": "indexed", "message": "Restored from registry."}
+            )
+            # Any doc that was mid-processing when server died is unrecoverable
+            if job_status[doc_id]["status"] == "processing":
+                job_status[doc_id] = {
+                    "status": "error",
+                    "message": "Server restarted during indexing — please re-upload.",
+                }
+        print(f"[registry] Restored {len(doc_registry)} document(s) from disk.")
+    except Exception as exc:
+        print(f"[registry] Failed to load registry: {exc}")
+
+
+def _save_registry() -> None:
+    """Persist doc_registry and job_status to disk."""
+    try:
+        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        serialisable_registry = {
+            doc_id: {**entry, "path": str(entry["path"])}
+            for doc_id, entry in doc_registry.items()
+        }
+        with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {"doc_registry": serialisable_registry, "job_status": job_status},
+                f,
+                indent=2,
+            )
+    except Exception as exc:
+        print(f"[registry] Failed to save registry: {exc}")
+
+
 @app.on_event("startup")
 async def _startup():
     global _embed_model
+    print("[startup] Loading doc registry from disk …")
+    _load_registry()
     print("[startup] Loading embedding model …")
     _embed_model = load_embedding_model()
     print("[startup] Opening ChromaDB collection …")
@@ -138,6 +197,9 @@ class AskResponse(BaseModel):
 def _set_status(doc_id: str, status: str, message: str) -> None:
     job_status[doc_id] = {"status": status, "message": message}
     print(f"[pipeline] [{status.upper()}] {doc_id[:8]} — {message}")
+    # Persist whenever status changes to a terminal state
+    if status in ("indexed", "error"):
+        _save_registry()
 
 
 # ── Background pipeline ────────────────────────────────────────────────────────
@@ -452,6 +514,8 @@ async def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)
     pages = _get_page_count(dest, suffix)
     doc_registry[doc_id] = {"name": file.filename, "path": dest, "pages": pages}
     _set_status(doc_id, "processing", "Queued for indexing …")
+    # Save immediately so the doc is known even before indexing completes
+    _save_registry()
     background_tasks.add_task(_run_pipeline, doc_id, dest)
 
     return IngestResponse(
