@@ -41,6 +41,8 @@ class Settings(BaseSettings):
 
     # ── Retrieval / indexing ──────────────────────────────────────────────────
     default_top_k: int = 5
+    retrieval_candidate_k: int = 15  # fetch this many from ChromaDB before reranking
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     index_batch_size: int = 500
     embed_batch_size: int = 64
 

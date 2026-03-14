@@ -60,28 +60,6 @@ def main() -> None:
     print(f"Collection     : {settings.collection_name}")
     print(f"Total vectors  : {collection.count()}")
 
-    # ── 4. Smoke test ─────────────────────────────────────────────────────────
-    print("\n=== Smoke test retrieval ===")
-    test_query = "What was Adobe's total revenue in fiscal 2023?"
-    results = retrieve(test_query, collection, model, content, top_k=3)
-    print(f"\nQuery: {test_query}\n")
-
-    for r in results:
-        print(
-            f"[{r['rank']}] score={r['score']}  type={r['type']}  "
-            f"pages={r['pages']}"
-        )
-        print(f"    heading : {r['heading'][:80]}")
-        if r["type"] == "text":
-            print(f"    text    : {r['text'][:200]}")
-        elif r["type"] == "table":
-            print(f"    caption : {r['caption']}")
-            print(f"    html    : {r['table_html'][:120]}...")
-        elif r["type"] == "image":
-            print(f"    caption : {r['caption']}")
-            print(f"    img_path: {r['img_path']}")
-        print()
-
 
 if __name__ == "__main__":
     main()

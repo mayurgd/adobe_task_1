@@ -13,9 +13,21 @@ Stage 1 (embedding side, this module):
         • image  : heading + caption
 
 Stage 2 (query-time, handled by retriever.py):
-    Full text is hydrated from the sidecar JSON (keyed by chunk id) for text
-    chunks, and from the original content_list via ``source_idx`` for tables
-    and images — so no content is ever truncated.
+    Full text is hydrated from metadata for text chunks, and from the original
+    content_list via ``source_idx`` for tables and images.
+
+Chunking strategy
+-----------------
+Heading-based grouping is the primary split. If the resulting body exceeds
+MAX_TOKENS when combined with its heading, it is passed to LangChain's
+RecursiveCharacterTextSplitter (token-aware, using the same tokenizer as the
+embedding model). The splitter tries separators in order:
+
+    \n\n  ->  \n  ->  ". "  ->  " "  ->  ""
+
+and merges pieces greedily up to (MAX_TOKENS - heading_tokens) with a
+OVERLAP_TOKENS sliding window. This guarantees no embed_text is silently
+truncated by the model.
 
 Public API:
     build_chunks(content: list) -> list[dict]
@@ -26,6 +38,9 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from transformers import AutoTokenizer
+
 from config import settings
 from kb_setup.text_utils import clean, table_column_headers, table_html_to_text
 
@@ -33,30 +48,89 @@ from kb_setup.text_utils import clean, table_column_headers, table_html_to_text
 ContentList = list[dict[str, Any]]
 Chunk = dict[str, Any]
 
+# ── Token budget ──────────────────────────────────────────────────────────────
+MAX_TOKENS = 480  # safe margin under bge-base-en-v1.5's 512 hard limit
+OVERLAP_TOKENS = 50  # token overlap carried into each successive sub-chunk
+
+# ── Lazy singletons ───────────────────────────────────────────────────────────
+_tokenizer: AutoTokenizer | None = None
+
+
+def _get_tokenizer() -> AutoTokenizer:
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = AutoTokenizer.from_pretrained(settings.embedding_model)
+    return _tokenizer
+
+
+def _count_tokens(text: str) -> int:
+    return len(_get_tokenizer().encode(text, add_special_tokens=False))
+
+
+def _get_splitter(heading: str) -> RecursiveCharacterTextSplitter:
+    """Return a splitter whose chunk_size budget is reduced by the heading cost.
+
+    This ensures that ``heading + split_body`` always fits within MAX_TOKENS
+    after the split, since LangChain only sees the body text.
+    """
+    heading_tokens = _count_tokens(heading)
+    return RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        _get_tokenizer(),
+        chunk_size=max(64, MAX_TOKENS - heading_tokens),
+        chunk_overlap=OVERLAP_TOKENS,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chunk factories
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _make_text_chunk(
     heading: str,
     text_parts: list[str],
     pages: set[int],
     source_idx: int,
-) -> Chunk | None:
-    """Assemble and return a text chunk, or None if the body is too short."""
+) -> list[Chunk]:
+    """Assemble text chunk(s) from *text_parts*, splitting if over token limit.
+
+    Returns a list — one logical section can become multiple chunks when it
+    exceeds MAX_TOKENS.
+    """
     if not text_parts:
-        return None
+        return []
+
     body = "\n".join(text_parts)
     if len(body) < settings.min_text_length:
-        return None
-    return {
-        "id": str(uuid.uuid4()),
-        "embed_text": clean(f"{heading}\n{body}"),
-        "type": "text",
-        "heading": heading,
-        "text": body,
-        "pages": sorted(pages),
-        "source_idx": source_idx,
-        "img_path": "",
-        "caption": "",
-    }
+        return []
+
+    # Split only if the combined heading + body exceeds the token limit
+    combined_tokens = _count_tokens(f"{heading}\n{body}")
+    if combined_tokens <= MAX_TOKENS:
+        splits = [body]
+    else:
+        splits = _get_splitter(heading).split_text(body)
+
+    chunks = []
+    for split_body in splits:
+        split_body = split_body.strip()
+        if len(split_body) < settings.min_text_length:
+            continue
+        chunks.append(
+            {
+                "id": str(uuid.uuid4()),
+                "embed_text": clean(f"{heading}\n{split_body}"),
+                "type": "text",
+                "heading": heading,
+                "text": split_body,
+                "pages": sorted(pages),
+                "source_idx": source_idx,
+                "img_path": "",
+                "caption": "",
+            }
+        )
+    return chunks
 
 
 def _make_table_chunk(
@@ -108,6 +182,11 @@ def _make_image_chunk(
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Public builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def build_chunks(content: ContentList) -> list[Chunk]:
     """Walk the flat content list in reading order and produce typed chunks.
 
@@ -116,18 +195,23 @@ def build_chunks(content: ContentList) -> list[Chunk]:
     ============  ============================================================
     Key           Description
     ============  ============================================================
-    id            UUID string — unique per chunk.
-    embed_text    Text that will be embedded (compact; excludes full cell data).
-    type          ``"text"`` | ``"table"`` | ``"image"``
+    id            UUID string - unique per chunk.
+    embed_text    Text that will be embedded. Always <= MAX_TOKENS tokens.
+    type          "text" | "table" | "image"
     heading       Nearest heading above this chunk in reading order.
     pages         Sorted list of page indices (int).
-    text          Full plain-text body — never truncated.
+    text          Full plain-text body - never truncated.
     source_idx    Index of the last contributing item in the original
                   content_list. Used at query-time to hydrate full HTML /
                   image metadata for table and image chunks.
     img_path      Relative image path (image chunks; convenience copy).
     caption       Caption string (table / image chunks).
     ============  ============================================================
+
+    Text chunks exceeding MAX_TOKENS are split via LangChain's
+    RecursiveCharacterTextSplitter (token-aware) and re-merged with a
+    OVERLAP_TOKENS overlap window. Table and image embed_texts are compact
+    by design and are not split.
 
     Args:
         content: Parsed ``_content_list.json`` as a list of dicts.
@@ -140,18 +224,16 @@ def build_chunks(content: ContentList) -> list[Chunk]:
     current_heading = ""
     current_text_parts: list[str] = []
     current_pages: set[int] = set()
-    current_source_idx: int = -1  # tracks last content_list index for text chunks
+    current_source_idx: int = -1
 
     def _flush() -> None:
-        """Flush pending text parts into a chunk (if substantial enough)."""
         nonlocal current_text_parts, current_pages
-        chunk = _make_text_chunk(
+        for chunk in _make_text_chunk(
             current_heading,
             current_text_parts,
             current_pages,
             current_source_idx,
-        )
-        if chunk:
+        ):
             chunks.append(chunk)
         current_text_parts = []
         current_pages = set()
@@ -163,13 +245,13 @@ def build_chunks(content: ContentList) -> list[Chunk]:
             text = clean(item.get("text", ""))
             if not text:
                 continue
-            if item.get("text_level"):  # heading — start new section
+            if item.get("text_level"):  # heading - flush and start new section
                 _flush()
                 current_heading = text
-            else:  # paragraph — accumulate
+            else:  # paragraph - accumulate
                 current_text_parts.append(text)
                 current_pages.add(item.get("page_idx", 0))
-                current_source_idx = source_idx  # always track the latest idx
+                current_source_idx = source_idx
 
         elif item_type == "table":
             _flush()
@@ -177,8 +259,6 @@ def build_chunks(content: ContentList) -> list[Chunk]:
 
         elif item_type == "image":
             chunks.append(_make_image_chunk(current_heading, item, source_idx))
-
-        # Unknown / unsupported types are silently ignored
 
     _flush()  # flush final section
 
