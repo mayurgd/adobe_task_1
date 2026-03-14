@@ -4,17 +4,8 @@ indexer.py
 Embeds a list of chunks (produced by chunker.py) and persists them in a
 ChromaDB collection.
 
-Responsibilities
-----------------
-* Load / initialise the SentenceTransformer embedding model.
-* Batch-encode all ``embed_text`` fields.
-* Serialise list-valued metadata (``pages``) to JSON strings so ChromaDB
-  accepts them (only str | int | float | bool are allowed in metadata).
-* Upsert everything into a fresh ChromaDB collection in configurable batches.
-
-Public API:
-    build_index(chunks: list[dict]) -> chromadb.Collection
-    log_chunk_stats(chunks: list[dict]) -> None
+Full chunk text is stored directly in ChromaDB metadata — no truncation,
+no sidecar file. This mirrors how table text has always been stored.
 """
 
 from __future__ import annotations
@@ -36,15 +27,7 @@ Chunk = dict[str, Any]
 
 
 def load_embedding_model(model_name: str | None = None) -> SentenceTransformer:
-    """Load and return the SentenceTransformer embedding model.
-
-    Args:
-        model_name: HuggingFace model name.  Defaults to
-                    ``settings.embedding_model``.
-
-    Returns:
-        Loaded ``SentenceTransformer`` instance.
-    """
+    """Load and return the SentenceTransformer embedding model."""
     name = model_name or settings.embedding_model
     print(f"[info] Loading embedding model: {name} …")
     return SentenceTransformer(name)
@@ -64,13 +47,12 @@ def build_index(
 ) -> chromadb.Collection:
     """Embed *chunks* and store them in a (re-created) ChromaDB collection.
 
-    The collection is dropped and recreated on every call so the function is
-    idempotent — safe to run multiple times without duplication.
+    Full chunk text is stored in metadata with no truncation — identical to
+    how table text is handled.
 
     Args:
         chunks:           List of chunk dicts as returned by ``build_chunks()``.
-        model:            Optional pre-loaded SentenceTransformer.  A new model
-                          is loaded from ``settings.embedding_model`` if omitted.
+        model:            Optional pre-loaded SentenceTransformer.
         chroma_db_path:   Override for ``settings.chroma_db_path``.
         collection_name:  Override for ``settings.collection_name``.
 
@@ -85,7 +67,6 @@ def build_index(
 
     client = chromadb.PersistentClient(path=db_path)
 
-    # Drop and recreate for idempotent re-runs
     try:
         client.delete_collection(coll_name)
     except Exception:
@@ -130,19 +111,18 @@ def build_index(
 def _build_metadatas(chunks: list[Chunk]) -> list[dict]:
     """Serialise each chunk into a ChromaDB-compatible metadata dict.
 
-    ChromaDB metadata values must be ``str | int | float | bool``.
-    Lists (e.g. ``pages``) are serialised to JSON strings.
+    ``text`` is stored in full — no truncation. ChromaDB metadata values must
+    be ``str | int | float | bool``; lists (``pages``) are JSON-serialised.
     """
     return [
         {
             "type": c["type"],
             "heading": c["heading"],
-            # Cap text length to keep per-vector metadata lean
-            "text": c["text"][: settings.metadata_text_cap],
+            "text": c["text"],
             "source_idx": c.get("source_idx", -1),
             "img_path": c.get("img_path", ""),
             "caption": c.get("caption", ""),
-            "pages": json.dumps(c["pages"]),  # list → JSON string
+            "pages": json.dumps(c["pages"]),
         }
         for c in chunks
     ]
@@ -154,11 +134,7 @@ def _build_metadatas(chunks: list[Chunk]) -> list[dict]:
 
 
 def log_chunk_stats(chunks: list[Chunk]) -> None:
-    """Print a brief summary of chunk counts by type to stdout.
-
-    Args:
-        chunks: List of chunk dicts as returned by ``build_chunks()``.
-    """
+    """Print a brief summary of chunk counts by type to stdout."""
     type_counts: dict[str, int] = {}
     for c in chunks:
         type_counts[c["type"]] = type_counts.get(c["type"], 0) + 1

@@ -7,25 +7,23 @@ asset hydration, and context serialisation for LLM consumption.
 Two-stage retrieval
 -------------------
 Stage 1 — Semantic search
-    The query is embedded with the same model used at index time.  ChromaDB
-    returns the top-k most similar chunk IDs along with their compact metadata.
+    The query is embedded with the same model used at index time. ChromaDB
+    returns the top-k most similar chunk IDs along with their metadata,
+    including the full text for every chunk type.
 
 Stage 2 — Asset hydration
     Table HTML and image paths were intentionally NOT stored in ChromaDB
-    metadata (too bulky).  Instead, each chunk carries a ``source_idx``
-    pointer back to the original ``content_list.json``.  The hydration step
+    metadata (too bulky). Instead, each chunk carries a ``source_idx``
+    pointer back to the original ``content_list.json``. The hydration step
     looks up that index and attaches the full asset to the result dict.
 
-Lazy singletons
----------------
-The embedding model, ChromaDB collection, and content list are each loaded once
-on first use and cached for the lifetime of the process.  This avoids repeated
-cold-start costs across multi-turn agent conversations.
+    Text chunks: full text comes straight from ``meta["text"]`` — no hydration
+    needed, no truncation.
 
 Public API:
-    query_documents(query, top_k)  -> list[dict]
+    query_documents(query, top_k)    -> list[dict]
     format_chunks_as_context(chunks) -> str
-    retrieve(query, collection, model, content, top_k) -> list[dict]   # testable
+    retrieve(query, collection, model, content, top_k) -> list[dict]
 """
 
 from __future__ import annotations
@@ -61,7 +59,7 @@ def retrieve(
         collection: ChromaDB collection created by ``indexer.build_index()``.
         model:      SentenceTransformer instance (same model used at index time).
         content:    Parsed ``content_list.json`` used for Stage 2 hydration.
-        top_k:      Number of results to return.  Defaults to
+        top_k:      Number of results to return. Defaults to
                     ``settings.default_top_k``.
 
     Returns:
@@ -75,7 +73,7 @@ def retrieve(
         type          ``"text"`` | ``"table"`` | ``"image"``
         heading       Section heading above this chunk.
         pages         List of page indices (int).
-        text          Plain-text body (paragraph, stringified table, caption).
+        text          Full plain-text body — never truncated.
         table_html    Full HTML of the table (table chunks only; else ``""``)
         img_path      Relative image path (image chunks only; else ``""``)
         caption       Caption string (table / image chunks).
@@ -95,11 +93,11 @@ def retrieve(
         meta = results["metadatas"][0][i]
         distance = results["distances"][0][i]
 
-        # Stage 2: hydrate full asset from the original content_list
         source_idx = meta.get("source_idx", -1)
         table_html = ""
         img_path = meta.get("img_path", "")
 
+        # Stage 2: hydrate table HTML and image paths from the original content_list
         if 0 <= source_idx < len(content):
             raw = content[source_idx]
             if meta["type"] == "table":
@@ -114,7 +112,7 @@ def retrieve(
                 "type": meta["type"],
                 "heading": meta["heading"],
                 "pages": json.loads(meta["pages"]),
-                "text": meta["text"],
+                "text": meta["text"],  # full text stored directly in metadata
                 "table_html": table_html,
                 "img_path": img_path,
                 "caption": meta["caption"],
@@ -130,23 +128,7 @@ def retrieve(
 
 
 def format_chunks_as_context(chunks: list[ResultChunk]) -> str:
-    """Serialise retrieved chunks into a labelled context block for an LLM.
-
-    Each chunk is rendered as::
-
-        [TYPE | heading: … | pages: … | score: …]
-        <body text>
-
-    Chunks are separated by ``---`` dividers so the LLM can clearly attribute
-    each piece of evidence to its source.
-
-    Args:
-        chunks: List of result dicts as returned by ``retrieve()`` or
-                ``query_documents()``.
-
-    Returns:
-        A single string ready to be inserted into an LLM prompt.
-    """
+    """Serialise retrieved chunks into a labelled context block for an LLM."""
     parts: list[str] = []
     for chunk in chunks:
         header = (
@@ -174,19 +156,10 @@ _singleton_model: SentenceTransformer | None = None
 _singleton_content: ContentList | None = None
 
 
-def get_retrieval_resources() -> tuple[chromadb.Collection, SentenceTransformer, ContentList]:
-    """Return ``(collection, model, content_list)``, initialising lazily on first call.
-
-    Subsequent calls return the cached instances instantly.  This pattern avoids
-    repeated model-loading cost across agent turns.
-
-    Returns:
-        3-tuple of (ChromaDB collection, SentenceTransformer, content list).
-
-    Raises:
-        chromadb.errors.InvalidCollectionException: If the ChromaDB collection
-            has not been built yet (run ``index_documents.py`` first).
-    """
+def get_retrieval_resources() -> (
+    tuple[chromadb.Collection, SentenceTransformer, ContentList]
+):
+    """Return ``(collection, model, content_list)``, initialising lazily on first call."""
     global _singleton_collection, _singleton_model, _singleton_content
 
     if _singleton_model is None:
@@ -199,24 +172,18 @@ def get_retrieval_resources() -> tuple[chromadb.Collection, SentenceTransformer,
         print(f"[info] Connected to ChromaDB collection '{settings.collection_name}'")
 
     if _singleton_content is None and settings.content_list_path.exists():
-        import json as _json
-
         with open(settings.content_list_path, encoding="utf-8") as fh:
-            _singleton_content = _json.load(fh)
+            _singleton_content = json.load(fh)
 
     return _singleton_collection, _singleton_model, _singleton_content or []
 
 
 def query_documents(query: str, top_k: int | None = None) -> list[ResultChunk]:
-    """Embed *query* and return the top-k most relevant chunks.
-
-    This is the primary entry point used by ``tools.py``.  It uses the lazy
-    singletons so the first call pays the model-load cost; subsequent calls
-    are fast.
+    """Embed *query* and return the top-k most relevant chunks with full text.
 
     Args:
         query:  Natural-language question.
-        top_k:  Number of results.  Defaults to ``settings.default_top_k``.
+        top_k:  Number of results. Defaults to ``settings.default_top_k``.
 
     Returns:
         List of result dicts as described in ``retrieve()``.

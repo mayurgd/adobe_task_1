@@ -13,8 +13,9 @@ Stage 1 (embedding side, this module):
         • image  : heading + caption
 
 Stage 2 (query-time, handled by retriever.py):
-    Full assets are fetched from the original content_list via ``source_idx``
-    so that bulky HTML is never stored in ChromaDB metadata.
+    Full text is hydrated from the sidecar JSON (keyed by chunk id) for text
+    chunks, and from the original content_list via ``source_idx`` for tables
+    and images — so no content is ever truncated.
 
 Public API:
     build_chunks(content: list) -> list[dict]
@@ -37,6 +38,7 @@ def _make_text_chunk(
     heading: str,
     text_parts: list[str],
     pages: set[int],
+    source_idx: int,
 ) -> Chunk | None:
     """Assemble and return a text chunk, or None if the body is too short."""
     if not text_parts:
@@ -51,7 +53,7 @@ def _make_text_chunk(
         "heading": heading,
         "text": body,
         "pages": sorted(pages),
-        "source_idx": -1,
+        "source_idx": source_idx,
         "img_path": "",
         "caption": "",
     }
@@ -119,9 +121,10 @@ def build_chunks(content: ContentList) -> list[Chunk]:
     type          ``"text"`` | ``"table"`` | ``"image"``
     heading       Nearest heading above this chunk in reading order.
     pages         Sorted list of page indices (int).
-    text          Plain-text body (paragraphs, stringified table, or caption).
-    source_idx    Index into the original content_list (–1 for text chunks).
-                  Used at query-time to hydrate full HTML / image metadata.
+    text          Full plain-text body — never truncated.
+    source_idx    Index of the last contributing item in the original
+                  content_list. Used at query-time to hydrate full HTML /
+                  image metadata for table and image chunks.
     img_path      Relative image path (image chunks; convenience copy).
     caption       Caption string (table / image chunks).
     ============  ============================================================
@@ -137,11 +140,17 @@ def build_chunks(content: ContentList) -> list[Chunk]:
     current_heading = ""
     current_text_parts: list[str] = []
     current_pages: set[int] = set()
+    current_source_idx: int = -1  # tracks last content_list index for text chunks
 
     def _flush() -> None:
         """Flush pending text parts into a chunk (if substantial enough)."""
         nonlocal current_text_parts, current_pages
-        chunk = _make_text_chunk(current_heading, current_text_parts, current_pages)
+        chunk = _make_text_chunk(
+            current_heading,
+            current_text_parts,
+            current_pages,
+            current_source_idx,
+        )
         if chunk:
             chunks.append(chunk)
         current_text_parts = []
@@ -160,13 +169,13 @@ def build_chunks(content: ContentList) -> list[Chunk]:
             else:  # paragraph — accumulate
                 current_text_parts.append(text)
                 current_pages.add(item.get("page_idx", 0))
+                current_source_idx = source_idx  # always track the latest idx
 
         elif item_type == "table":
             _flush()
             chunks.append(_make_table_chunk(current_heading, item, source_idx))
 
         elif item_type == "image":
-            # Images don't interrupt paragraph flow — no flush needed
             chunks.append(_make_image_chunk(current_heading, item, source_idx))
 
         # Unknown / unsupported types are silently ignored

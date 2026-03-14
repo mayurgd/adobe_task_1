@@ -3,17 +3,6 @@ config.py
 
 Single source of truth for all environment variables, file paths, and
 model/index constants used across the project.
-
-Uses pydantic-settings for automatic env var loading, type validation,
-and fail-fast errors on missing required fields.
-
-Usage:
-    from src.config import settings
-    print(settings.openai_model)
-    print(settings.chroma_db_path)
-
-Install:
-    pip install pydantic-settings python-dotenv
 """
 
 from __future__ import annotations
@@ -29,15 +18,10 @@ load_dotenv(_REPO_ROOT / ".env")
 
 
 class Settings(BaseSettings):
-    """
-    All configuration is read from environment variables or the .env file.
-    Required fields (no default) raise a ValidationError at startup if missing.
-    """
-
     model_config = SettingsConfigDict()
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
-    openai_api_key: str  # required — no default
+    openai_api_key: str
     openai_model: str = "gpt-4o-mini"
 
     # ── Langfuse (optional) ───────────────────────────────────────────────────
@@ -50,21 +34,17 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-base-en-v1.5"
 
     # ── MinerU ────────────────────────────────────────────────────────────────
-    # Base output directory for MinerU.
-    # MinerU writes:  <mineru_output_dir>/<pdf_stem>/auto/<pdf_stem>_content_list.json
-    # Example .env:   MINERU_OUTPUT_DIR=/Users/mayurgd/.../data/outputs/annual_reports
     mineru_output_dir: str = str(_REPO_ROOT / "data" / "docs" / "outputs")
 
     # ── Chunking ──────────────────────────────────────────────────────────────
-    min_text_length: int = 30  # minimum chars for a text chunk to be indexed
-    metadata_text_cap: int = 2000  # max chars stored in ChromaDB metadata
+    min_text_length: int = 30
 
     # ── Retrieval / indexing ──────────────────────────────────────────────────
     default_top_k: int = 5
     index_batch_size: int = 500
     embed_batch_size: int = 64
 
-    # ── Derived fields (computed from repo root — not env vars) ───────────────
+    # ── Derived fields ────────────────────────────────────────────────────────
     @computed_field
     @property
     def repo_root(self) -> Path:
@@ -78,6 +58,7 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def content_list_path(self) -> Path:
+        """Return the most recently created _content_list.json under mineru_output_dir."""
         base = Path(self.mineru_output_dir)
         matches = list(base.glob("*/auto/*_content_list.json"))
         if not matches:
@@ -104,5 +85,4 @@ class Settings(BaseSettings):
         return self
 
 
-# Module-level singleton
 settings = Settings()

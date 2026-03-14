@@ -93,7 +93,6 @@ def _get_collection():
 
 
 def _load_registry() -> None:
-    """Load doc_registry and job_status from disk on startup."""
     global doc_registry, job_status
     if not REGISTRY_PATH.exists():
         return
@@ -104,17 +103,14 @@ def _load_registry() -> None:
         raw_status: dict = data.get("job_status", {})
 
         for doc_id, entry in raw_registry.items():
-            # Restore path as a Path object; verify the file still exists
             path = Path(entry["path"])
             if not path.exists():
-                # File was deleted from disk — skip this entry
                 print(f"[registry] Skipping {doc_id[:8]}: file missing at {path}")
                 continue
             doc_registry[doc_id] = {**entry, "path": path}
             job_status[doc_id] = raw_status.get(
                 doc_id, {"status": "indexed", "message": "Restored from registry."}
             )
-            # Any doc that was mid-processing when server died is unrecoverable
             if job_status[doc_id]["status"] == "processing":
                 job_status[doc_id] = {
                     "status": "error",
@@ -126,7 +122,6 @@ def _load_registry() -> None:
 
 
 def _save_registry() -> None:
-    """Persist doc_registry and job_status to disk."""
     try:
         REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
         serialisable_registry = {
@@ -197,7 +192,6 @@ class AskResponse(BaseModel):
 def _set_status(doc_id: str, status: str, message: str) -> None:
     job_status[doc_id] = {"status": status, "message": message}
     print(f"[pipeline] [{status.upper()}] {doc_id[:8]} — {message}")
-    # Persist whenever status changes to a terminal state
     if status in ("indexed", "error"):
         _save_registry()
 
@@ -258,7 +252,7 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
                 "doc_id": c["doc_id"],
                 "type": c["type"],
                 "heading": c["heading"],
-                "text": c["text"][: settings.metadata_text_cap],
+                "text": c["text"],  # full text, no truncation
                 "source_idx": c.get("source_idx", -1),
                 "img_path": c.get("img_path", ""),
                 "caption": c.get("caption", ""),
@@ -295,22 +289,11 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
 
 
 def _sse(payload: dict) -> str:
-    """Serialise a dict as an SSE data line."""
     return f"data: {json.dumps(payload)}\n\n"
 
 
 @app.post("/ask")
 async def ask(body: AskRequest):
-    """
-    Stream agent progress + final answer as Server-Sent Events.
-
-    Event shapes:
-        {"type": "todos",     "todos": [{"title": str, "status": str}, …]}
-        {"type": "searching", "query": str}
-        {"type": "retrieved"}
-        {"type": "answer",    "answer": str, "sources": [...]}
-        {"type": "error",     "message": str}
-    """
     not_ready = [
         d for d in body.doc_ids if job_status.get(d, {}).get("status") != "indexed"
     ]
@@ -325,7 +308,6 @@ async def ask(body: AskRequest):
     async def event_stream():
         q: asyncio.Queue[dict | None] = asyncio.Queue()
 
-        # ── Try agent path first (requires deepagents + tools) ─────────────
         try:
             from agent import SYSTEM_PROMPT
             from deepagents import create_deep_agent
@@ -345,13 +327,12 @@ async def ask(body: AskRequest):
             async def _run_agent():
                 try:
                     reply = await stream_agent_turn(agent, conversation, event_queue=q)
-                    # Build source refs from the last ChromaDB query
                     sources = await asyncio.to_thread(_get_sources, body)
                     await q.put({"type": "answer", "answer": reply, "sources": sources})
                 except Exception as exc:
                     await q.put({"type": "error", "message": str(exc)})
                 finally:
-                    await q.put(None)  # sentinel
+                    await q.put(None)
 
             asyncio.create_task(_run_agent())
 
@@ -362,7 +343,6 @@ async def ask(body: AskRequest):
                 yield _sse(event)
 
         except ImportError:
-            # ── Fallback: plain vector-search + OpenAI (no agent) ──────────
             yield _sse({"type": "searching", "query": body.question})
             try:
                 answer_data = await _plain_rag(body)
@@ -382,7 +362,7 @@ async def ask(body: AskRequest):
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -391,7 +371,6 @@ async def ask(body: AskRequest):
 
 
 async def _plain_rag(body: AskRequest) -> dict:
-    """Embed → retrieve → OpenAI. Returns {answer, sources}."""
     q_embedding = _embed_model.encode(body.question, normalize_embeddings=True).tolist()
 
     collection = _get_collection()
@@ -420,9 +399,11 @@ async def _plain_rag(body: AskRequest) -> dict:
     for i, (meta, doc_text) in enumerate(zip(metadatas, documents)):
         pages = json.loads(meta.get("pages", "[0]"))
         page_str = ", ".join(str(p + 1) for p in pages)
+        # Full text from metadata; fall back to embed_text if somehow missing
+        full_text = meta.get("text") or doc_text
         context_parts.append(
             f"[Chunk {i+1} | doc={meta['doc_id'][:8]} | page(s)={page_str}]\n"
-            f"{meta.get('text') or doc_text}"
+            f"{full_text}"
         )
     context = "\n\n---\n\n".join(context_parts)
 
@@ -457,7 +438,6 @@ async def _plain_rag(body: AskRequest) -> dict:
 
 
 def _get_sources(body: AskRequest) -> list[dict]:
-    """Re-run a quick retrieval to get source refs for the agent path."""
     try:
         q_emb = _embed_model.encode(body.question, normalize_embeddings=True).tolist()
         collection = _get_collection()
@@ -514,7 +494,6 @@ async def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)
     pages = _get_page_count(dest, suffix)
     doc_registry[doc_id] = {"name": file.filename, "path": dest, "pages": pages}
     _set_status(doc_id, "processing", "Queued for indexing …")
-    # Save immediately so the doc is known even before indexing completes
     _save_registry()
     background_tasks.add_task(_run_pipeline, doc_id, dest)
 
@@ -577,9 +556,6 @@ async def health():
 
 
 app.mount("/", StaticFiles(directory=str(ROOT), html=True), name="static")
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 
 def _get_page_count(path: Path, suffix: str) -> int:
