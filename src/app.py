@@ -31,6 +31,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
 from config import settings
 from kb_setup.chunker import build_chunks
@@ -435,6 +436,27 @@ async def list_docs():
         }
         for k, v in doc_registry.items()
     ]
+
+
+@app.get("/file/{doc_id}")
+async def get_file(doc_id: str):
+    """Serve the original uploaded file so the frontend PDF viewer can
+    re-render it after a page refresh (when in-memory bytes are gone)."""
+    if doc_id not in doc_registry:
+        raise HTTPException(status_code=404, detail=f"Unknown doc_id: {doc_id}")
+    entry = doc_registry[doc_id]
+    path = Path(entry["path"])
+    name = entry["name"]
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"File not found on disk: {path.name}",
+        )
+    return FileResponse(
+        path=str(path),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{name}"'},
+    )
 
 
 @app.get("/health")
