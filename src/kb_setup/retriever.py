@@ -94,7 +94,7 @@ def query_documents(
     candidates.sort(key=lambda c: c["score"], reverse=True)
 
     # Drop negatives (cross-encoder: negative = not relevant)
-    candidates = [c for c in candidates if c["score"] >= 0] or candidates[:1]
+    candidates = [c for c in candidates if c["score"] >= 0] or []
 
     for rank, c in enumerate(candidates[:k], start=1):
         c["rank"] = rank
