@@ -65,7 +65,7 @@ DOCS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 REGISTRY_PATH = ROOT / "data" / "registry.json"
 
 # ── Global singletons ──────────────────────────────────────────────────────────
-import chromadb  # noqa: E402
+import chromadb
 
 _chroma_client: chromadb.PersistentClient | None = None
 _chroma_collection = None

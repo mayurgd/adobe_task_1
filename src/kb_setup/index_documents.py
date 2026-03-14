@@ -30,7 +30,7 @@ from config import settings
 from kb_setup.indexer import build_index, load_embedding_model, log_chunk_stats
 
 # Re-export for backward compatibility
-from retriever import format_chunks_as_context, query_documents, retrieve  # noqa: F401
+from retriever import format_chunks_as_context, query_documents, retrieve
 
 
 # ─────────────────────────────────────────────────────────────────────────────
