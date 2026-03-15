@@ -122,10 +122,15 @@ def _load_registry() -> None:
 def _save_registry() -> None:
     try:
         REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ser_registry = {
-            doc_id: {**entry, "path": str(entry["path"])}
-            for doc_id, entry in doc_registry.items()
-        }
+        ser_registry = {}
+        for doc_id, entry in doc_registry.items():
+            ser_registry[doc_id] = {
+                **entry,
+                "path": str(entry["path"]),
+                # Ensure unified fields are always present
+                "chunk_count": entry.get("chunk_count", 0),
+                "indexed_at": entry.get("indexed_at", ""),
+            }
         with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
             json.dump(
                 {"doc_registry": ser_registry, "job_status": job_status},
@@ -559,10 +564,9 @@ async def get_status(doc_id: str):
 @app.get("/docs-list")
 async def list_docs():
     """
-    Merges in-memory jobs with kb_setup doc_registry entries so the UI can
-    fully restore the document list after a page refresh.
+    Returns all documents from the unified registry.json.
+    No second file to merge — doc_registry.py now reads the same registry.json.
     """
-    seen_names: set[str] = set()
     result = []
 
     for doc_id, entry in doc_registry.items():
@@ -574,45 +578,6 @@ async def list_docs():
                 "pages": entry.get("pages", 1),
                 "status": js["status"],
                 "message": js.get("message", ""),
-            }
-        )
-        seen_names.add(entry["name"])
-
-    # Pull in anything from kb_setup doc_registry not already represented
-    import chromadb as _chromadb
-
-    for entry in list_all():
-        if entry["filename"] in seen_names:
-            continue
-        coll_name = entry["collection_name"]
-        try:
-            _chromadb.PersistentClient(path=settings.chroma_db_path).get_collection(
-                coll_name
-            )
-        except Exception:
-            continue  # stale entry — collection gone
-
-        synthetic_id = f"reg_{coll_name}"
-        if synthetic_id in doc_registry:
-            continue
-
-        doc_registry[synthetic_id] = {
-            "name": entry["filename"],
-            "path": Path(""),
-            "pages": entry.get("chunk_count", 1),
-            "collection_name": coll_name,
-        }
-        job_status[synthetic_id] = {
-            "status": "indexed",
-            "message": "Restored from kb_setup registry.",
-        }
-        result.append(
-            {
-                "doc_id": synthetic_id,
-                "name": entry["filename"],
-                "pages": entry.get("chunk_count", 1),
-                "status": "indexed",
-                "message": "Restored from kb_setup registry.",
             }
         )
 
