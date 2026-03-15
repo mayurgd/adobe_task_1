@@ -101,6 +101,8 @@
     .pdf-page-num-bar{text-align:center;padding:6px 0 8px;font-size:9.5px;color:#bbb;border-top:0.5px solid #f0f0ee;background:white;}
     @keyframes srcPulse{0%{box-shadow:0 0 0 0 rgba(24,95,165,0.5)}70%{box-shadow:0 0 0 14px rgba(24,95,165,0)}100%{box-shadow:0 0 0 0 rgba(24,95,165,0)}}
     .pdf-page-wrap.pulse{animation:srcPulse 0.8s ease-out;}
+    /* ── Highlight overlay canvas — drawn on top of PDF canvas ── */
+    .pdf-hl-canvas{position:absolute;top:0;left:0;pointer-events:none;}
     .pane-chat{width:40%;flex-shrink:0;min-width:320px;display:flex;flex-direction:column;background:var(--bg-primary);border-left:0.5px solid var(--border);overflow:hidden;}
     .chat-header{padding:11px 14px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:9px;flex-shrink:0;}
     .agent-av{width:30px;height:30px;border-radius:50%;flex-shrink:0;background:linear-gradient(135deg,#185FA5,#0F6E56);display:flex;align-items:center;justify-content:center;}
@@ -111,6 +113,8 @@
     .ch-space{flex:1;}
     .ch-pills{display:flex;gap:5px;}
     .ch-pill{font-size:10px;padding:2px 8px;border-radius:9px;background:var(--bg-secondary);border:0.5px solid var(--border);color:var(--text-secondary);}
+    /* Active doc pill in chat header */
+    .ch-pill.active-doc{background:var(--accent-bg);border-color:var(--accent-bd);color:var(--accent);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .chat-messages{flex:1;overflow-y:auto;padding:16px 14px;display:flex;flex-direction:column;gap:14px;}
     .chat-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;padding:24px;}
     .chat-empty svg{width:36px;height:36px;opacity:0.2;}
@@ -124,8 +128,6 @@
     .msg-bubble{padding:9px 12px;border-radius:11px;font-size:13px;line-height:1.6;border:0.5px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);}
     .msg.user .msg-bubble{background:var(--accent-bg);border-color:var(--accent-bd);color:var(--accent-dark);border-radius:11px 11px 3px 11px;}
     .msg.ai .msg-bubble{border-radius:3px 11px 11px 11px;}
-
-    /* ── Markdown rendering inside AI bubbles ── */
     .msg-bubble p { margin: 0 0 6px; }
     .msg-bubble p:last-child { margin-bottom: 0; }
     .msg-bubble ul, .msg-bubble ol { margin: 4px 0 8px 18px; padding: 0; }
@@ -133,76 +135,21 @@
     .msg-bubble li:last-child { margin-bottom: 0; }
     .msg-bubble strong { font-weight: 600; color: var(--text-primary); }
     .msg-bubble em { font-style: italic; }
-    .msg-bubble code {
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 11.5px;
-      background: var(--bg-tertiary);
-      border: 0.5px solid var(--border);
-      border-radius: 3px;
-      padding: 1px 5px;
-    }
-    .msg-bubble pre {
-      background: var(--bg-tertiary);
-      border: 0.5px solid var(--border);
-      border-radius: var(--r-sm);
-      padding: 8px 10px;
-      overflow-x: auto;
-      margin: 6px 0;
-    }
-    .msg-bubble pre code {
-      background: none;
-      border: none;
-      padding: 0;
-      font-size: 11.5px;
-    }
-    .msg-bubble h1, .msg-bubble h2, .msg-bubble h3 {
-      font-size: 13px;
-      font-weight: 600;
-      margin: 8px 0 4px;
-      color: var(--text-primary);
-    }
-    .msg-bubble h1:first-child, .msg-bubble h2:first-child, .msg-bubble h3:first-child {
-      margin-top: 0;
-    }
-    .msg-bubble hr {
-      border: none;
-      border-top: 0.5px solid var(--border);
-      margin: 8px 0;
-    }
-    .msg-bubble blockquote {
-      border-left: 2px solid var(--accent-bd);
-      margin: 4px 0;
-      padding: 2px 10px;
-      color: var(--text-secondary);
-    }
-    /* Financial highlight row (bold label + value) */
-    .msg-bubble .md-kv {
-      display: flex; gap: 6px; align-items: baseline;
-    }
-
+    .msg-bubble code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11.5px; background: var(--bg-tertiary); border: 0.5px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+    .msg-bubble pre { background: var(--bg-tertiary); border: 0.5px solid var(--border); border-radius: var(--r-sm); padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+    .msg-bubble pre code { background: none; border: none; padding: 0; font-size: 11.5px; }
+    .msg-bubble h1, .msg-bubble h2, .msg-bubble h3 { font-size: 13px; font-weight: 600; margin: 8px 0 4px; color: var(--text-primary); }
+    .msg-bubble h1:first-child, .msg-bubble h2:first-child, .msg-bubble h3:first-child { margin-top: 0; }
+    .msg-bubble hr { border: none; border-top: 0.5px solid var(--border); margin: 8px 0; }
+    .msg-bubble blockquote { border-left: 2px solid var(--accent-bd); margin: 4px 0; padding: 2px 10px; color: var(--text-secondary); }
     .msg-sources{display:flex;gap:4px;flex-wrap:wrap;}
     .src-tag{font-size:10px;padding:2px 8px;border-radius:5px;background:var(--bg-secondary);border:0.5px solid var(--border);color:var(--text-secondary);cursor:pointer;transition:border-color 0.12s,color 0.12s;}
     .src-tag:hover{border-color:var(--accent-bd);color:var(--accent);}
     .msg-time{font-size:9.5px;color:var(--text-hint);}
-
     /* ── Agent status panel ── */
-    .agent-status-panel{
-      display:flex;flex-direction:column;gap:0;
-      border:0.5px solid var(--border);border-radius:var(--r-lg);
-      background:var(--bg-secondary);overflow:hidden;
-      font-size:11.5px;
-    }
-    .asp-header{
-      display:flex;align-items:center;gap:7px;
-      padding:8px 11px;
-      border-bottom:0.5px solid var(--border);
-      background:var(--bg-primary);
-      cursor:pointer;user-select:none;
-    }
-    .asp-header-icon{
-      width:18px;height:18px;border-radius:4px;
-      background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;
-    }
+    .agent-status-panel{display:flex;flex-direction:column;gap:0;border:0.5px solid var(--border);border-radius:var(--r-lg);background:var(--bg-secondary);overflow:hidden;font-size:11.5px;}
+    .asp-header{display:flex;align-items:center;gap:7px;padding:8px 11px;border-bottom:0.5px solid var(--border);background:var(--bg-primary);cursor:pointer;user-select:none;}
+    .asp-header-icon{width:18px;height:18px;border-radius:4px;background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
     .asp-header-icon svg{width:10px;height:10px;}
     .asp-header-title{font-size:11.5px;font-weight:500;flex:1;color:var(--text-primary);}
     .asp-header-status{font-size:10px;color:var(--text-secondary);}
@@ -210,13 +157,7 @@
     .asp-chevron.open{transform:rotate(180deg);}
     .asp-body{padding:8px 11px;display:flex;flex-direction:column;gap:6px;}
     .asp-body.collapsed{display:none;}
-
-    .asp-todo{
-      display:flex;align-items:flex-start;gap:7px;
-      padding:5px 8px;border-radius:var(--r-sm);
-      background:var(--bg-primary);border:0.5px solid var(--border);
-      transition:border-color 0.15s,background 0.15s;
-    }
+    .asp-todo{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;border-radius:var(--r-sm);background:var(--bg-primary);border:0.5px solid var(--border);transition:border-color 0.15s,background 0.15s;}
     .asp-todo.done{background:var(--green-bg);border-color:var(--green-bd);}
     .asp-todo.active{background:var(--accent-bg);border-color:var(--accent-bd);}
     .asp-todo-icon{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;transition:all 0.2s;}
@@ -229,18 +170,11 @@
     .asp-todo-text{font-size:11.5px;color:var(--text-secondary);line-height:1.4;flex:1;padding-top:1px;}
     .asp-todo.done .asp-todo-text{color:var(--green);text-decoration:line-through;text-decoration-color:rgba(59,109,17,0.4);}
     .asp-todo.active .asp-todo-text{color:var(--accent);font-weight:500;}
-
-    .asp-search{
-      display:flex;align-items:center;gap:7px;
-      padding:5px 8px;border-radius:var(--r-sm);
-      background:var(--accent-bg);border:0.5px solid var(--accent-bd);
-    }
+    .asp-search{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--r-sm);background:var(--accent-bg);border:0.5px solid var(--accent-bd);}
     .asp-search-icon{font-size:11px;flex-shrink:0;}
-    .asp-search-text{font-size:11px;color:var(--accent);flex:1;font-style:italic;
-      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .asp-search-text{font-size:11px;color:var(--accent);flex:1;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .asp-search.done{background:var(--green-bg);border-color:var(--green-bd);}
     .asp-search.done .asp-search-text{color:var(--green);font-style:normal;}
-
     .input-area{padding:10px 14px 14px;border-top:0.5px solid var(--border);flex-shrink:0;}
     .input-row{display:flex;align-items:flex-end;gap:7px;border:0.5px solid var(--border-md);border-radius:var(--r-lg);padding:7px 8px;background:var(--bg-secondary);transition:border-color 0.15s;}
     .input-row:focus-within{border-color:var(--accent);}
@@ -288,7 +222,7 @@
       </div>
       <label class="upload-area" id="uploadZone">
         <input type="file" id="fileInput" accept=".pdf,.docx,.txt" multiple onchange="handleUpload(this.files)" />
-        <p>Drop file or <span>browse</span><br>PDF</p>
+        <p>Drop file or <span>browse</span><br>PDF · DOCX · TXT</p>
       </label>
     </aside>
     <div class="resize-handle" id="rh1"></div>
@@ -322,7 +256,11 @@
           <div class="agent-status"><span class="status-dot"></span><span id="agentStatusText">Loading…</span></div>
         </div>
         <div class="ch-space"></div>
-        <div class="ch-pills"><span class="ch-pill">RAG</span></div>
+        <div class="ch-pills">
+          <span class="ch-pill">RAG</span>
+          <!-- active doc pill — shown when a doc is selected -->
+          <span class="ch-pill active-doc" id="activeDocPill" style="display:none"></span>
+        </div>
       </div>
       <div class="chat-messages" id="chatMessages">
         <div class="chat-empty" id="chatEmpty">
@@ -344,13 +282,20 @@
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
-const BACKEND_URL='./ask', INGEST_URL='./ingest', STATUS_URL='./status';
-const DOCS_LIST_URL='./docs-list', FILE_URL='./file';
-const POLL_INTERVAL=2000;
-if(typeof pdfjsLib!=='undefined') pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// ── API base — adjust if your FastAPI runs on a different port ────────────────
+const API = 'http://localhost:8000';
+const BACKEND_URL  = `${API}/ask`;
+const INGEST_URL   = `${API}/ingest`;
+const STATUS_URL   = `${API}/status`;
+const DOCS_LIST_URL= `${API}/docs-list`;
+const FILE_URL     = `${API}/file`;
+const POLL_INTERVAL = 2000;
+
+if(typeof pdfjsLib!=='undefined')
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 const docs={};
-let activeDocId=null,currentPage=1,zoomLevel=100,isLoading=false;
+let activeDocId=null, currentPage=1, zoomLevel=100, isLoading=false;
 const $=id=>document.getElementById(id);
 function now(){return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,100)+'px';}
@@ -358,129 +303,51 @@ function scrollBottom(){const c=$('chatMessages');c.scrollTop=c.scrollHeight;}
 function indexedIds(){return Object.entries(docs).filter(([,v])=>v.indexStatus==='indexed').map(([k])=>k);}
 function processingCnt(){return Object.values(docs).filter(v=>v.indexStatus==='processing').length;}
 
+// ── Update active-doc pill in chat header ─────────────────────────────────────
+function _updateActiveDocPill() {
+  const pill = $('activeDocPill');
+  if (!activeDocId || !docs[activeDocId]) { pill.style.display='none'; return; }
+  const name = docs[activeDocId].name || '';
+  const short = name.length > 22 ? name.slice(0, 20) + '…' : name;
+  pill.textContent = '📄 ' + short;
+  pill.title = name;
+  pill.style.display = '';
+}
+
 /* ══════════════════════════════════════════════════
    MARKDOWN RENDERER
-   Converts the agent's markdown text to safe HTML.
-   Handles: headings, bold, italic, inline code,
-   fenced code blocks, bullet lists, numbered lists,
-   blockquotes, horizontal rules, and paragraphs.
    ══════════════════════════════════════════════════ */
 function renderMarkdown(md) {
   if (!md) return '';
-
-  // Escape HTML entities in raw text (but not in code spans we handle separately)
-  function esc(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  const lines = md.split('\n');
-  let html = '';
-  let i = 0;
-
-  // Helpers
-  function inlineFormat(text) {
-    // Fenced inline code (must come before bold/italic to avoid double-processing)
-    text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
-    // Bold+italic ***text***
-    text = text.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
-    // Bold **text**
-    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    // Italic *text*
-    text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    // Bold __text__
-    text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-    // Italic _text_
-    text = text.replace(/_([^_]+)_/g, '<em>$1</em>');
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+  const lines=md.split('\n');let html='',i=0;
+  function inlineFormat(text){
+    text=text.replace(/`([^`]+)`/g,(_,c)=>`<code>${esc(c)}</code>`);
+    text=text.replace(/\*\*\*([^*]+)\*\*\*/g,'<strong><em>$1</em></strong>');
+    text=text.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    text=text.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+    text=text.replace(/__([^_]+)__/g,'<strong>$1</strong>');
+    text=text.replace(/_([^_]+)_/g,'<em>$1</em>');
     return text;
   }
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // ── Fenced code block ────────────────────────────────────────────────
-    if (line.trimStart().startsWith('```')) {
-      const lang = line.replace(/^```/, '').trim();
-      let code = '';
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
-        code += esc(lines[i]) + '\n';
-        i++;
-      }
-      html += `<pre><code>${code.trimEnd()}</code></pre>`;
-      i++;
-      continue;
+  while(i<lines.length){
+    const line=lines[i];
+    if(line.trimStart().startsWith('```')){
+      const lang=line.replace(/^```/,'').trim();let code='';i++;
+      while(i<lines.length&&!lines[i].trimStart().startsWith('```')){code+=esc(lines[i])+'\n';i++;}
+      html+=`<pre><code>${code.trimEnd()}</code></pre>`;i++;continue;
     }
-
-    // ── Heading ──────────────────────────────────────────────────────────
-    const hMatch = line.match(/^(#{1,3})\s+(.+)/);
-    if (hMatch) {
-      const level = hMatch[1].length;
-      html += `<h${level}>${inlineFormat(esc(hMatch[2]))}</h${level}>`;
-      i++; continue;
-    }
-
-    // ── Horizontal rule ──────────────────────────────────────────────────
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
-      html += '<hr>';
-      i++; continue;
-    }
-
-    // ── Blockquote ───────────────────────────────────────────────────────
-    if (line.startsWith('> ')) {
-      let bq = '';
-      while (i < lines.length && lines[i].startsWith('> ')) {
-        bq += inlineFormat(esc(lines[i].slice(2))) + ' ';
-        i++;
-      }
-      html += `<blockquote>${bq.trim()}</blockquote>`;
-      continue;
-    }
-
-    // ── Unordered list ───────────────────────────────────────────────────
-    if (/^(\s*[-*+])\s+/.test(line)) {
-      html += '<ul>';
-      while (i < lines.length && /^(\s*[-*+])\s+/.test(lines[i])) {
-        const item = lines[i].replace(/^\s*[-*+]\s+/, '');
-        html += `<li>${inlineFormat(esc(item))}</li>`;
-        i++;
-      }
-      html += '</ul>';
-      continue;
-    }
-
-    // ── Ordered list ─────────────────────────────────────────────────────
-    if (/^\d+\.\s+/.test(line)) {
-      html += '<ol>';
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
-        const item = lines[i].replace(/^\d+\.\s+/, '');
-        html += `<li>${inlineFormat(esc(item))}</li>`;
-        i++;
-      }
-      html += '</ol>';
-      continue;
-    }
-
-    // ── Blank line → paragraph break ─────────────────────────────────────
-    if (line.trim() === '') {
-      i++; continue;
-    }
-
-    // ── Plain paragraph ───────────────────────────────────────────────────
-    // Accumulate consecutive non-special lines into one <p>
-    let para = '';
-    while (
-      i < lines.length &&
-      lines[i].trim() !== '' &&
-      !/^(#{1,3}|```|> |\s*[-*+]\s|\d+\.\s|-{3,}|\*{3,})/.test(lines[i])
-    ) {
-      para += (para ? ' ' : '') + lines[i].trim();
-      i++;
-    }
-    if (para) {
-      html += `<p>${inlineFormat(esc(para))}</p>`;
-    }
+    const hMatch=line.match(/^(#{1,3})\s+(.+)/);
+    if(hMatch){const level=hMatch[1].length;html+=`<h${level}>${inlineFormat(esc(hMatch[2]))}</h${level}>`;i++;continue;}
+    if(/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())){html+='<hr>';i++;continue;}
+    if(line.startsWith('> ')){let bq='';while(i<lines.length&&lines[i].startsWith('> ')){bq+=inlineFormat(esc(lines[i].slice(2)))+' ';i++;}html+=`<blockquote>${bq.trim()}</blockquote>`;continue;}
+    if(/^(\s*[-*+])\s+/.test(line)){html+='<ul>';while(i<lines.length&&/^(\s*[-*+])\s+/.test(lines[i])){const item=lines[i].replace(/^\s*[-*+]\s+/,'');html+=`<li>${inlineFormat(esc(item))}</li>`;i++;}html+='</ul>';continue;}
+    if(/^\d+\.\s+/.test(line)){html+='<ol>';while(i<lines.length&&/^\d+\.\s+/.test(lines[i])){const item=lines[i].replace(/^\d+\.\s+/,'');html+=`<li>${inlineFormat(esc(item))}</li>`;i++;}html+='</ol>';continue;}
+    if(line.trim()===''){i++;continue;}
+    let para='';
+    while(i<lines.length&&lines[i].trim()!==''&&!/^(#{1,3}|```|> |\s*[-*+]\s|\d+\.\s|-{3,}|\*{3,})/.test(lines[i])){para+=(para?' ':'')+lines[i].trim();i++;}
+    if(para)html+=`<p>${inlineFormat(esc(para))}</p>`;
   }
-
   return html;
 }
 
@@ -499,6 +366,7 @@ function updateStatus(){
     inp.disabled=false;inp.placeholder='Ask a question about your document…';btn.disabled=false;btn.style.opacity='1';
   }
   $('docCount').textContent=total;
+  _updateActiveDocPill();
 }
 
 function setBadge(docId,status,label){
@@ -518,9 +386,15 @@ function startPolling(docId){
       if(!res.ok)throw new Error('http '+res.status);
       const data=await res.json();
       docs[docId].indexStatus=data.status;
-      if(data.status==='indexed'){clearInterval(timer);docs[docId].pollTimer=null;setBadge(docId,'indexed');updateStatus();}
-      else if(data.status==='error'){clearInterval(timer);docs[docId].pollTimer=null;docs[docId].errorMessage=data.message;setBadge(docId,'error');updateStatus();}
-      else{const short=data.message.length>20?data.message.slice(0,20)+'…':data.message;setBadge(docId,'processing',short);}
+      if(data.status==='indexed'){
+        clearInterval(timer);docs[docId].pollTimer=null;
+        if(data.pages)docs[docId].pages=data.pages;
+        setBadge(docId,'indexed');updateStatus();
+      } else if(data.status==='error'){
+        clearInterval(timer);docs[docId].pollTimer=null;docs[docId].errorMessage=data.message;setBadge(docId,'error');updateStatus();
+      } else {
+        const short=data.message.length>20?data.message.slice(0,20)+'…':data.message;setBadge(docId,'processing',short);
+      }
     }catch(e){}
   },POLL_INTERVAL);
   docs[docId].pollTimer=timer;
@@ -563,7 +437,13 @@ async function rehydrateDocs(){
     }
     updateStatus();
     if(firstDocId){const el=document.querySelector(`.doc-item[data-doc="${firstDocId}"]`);if(el)selectDocEl(el);}
-  }catch(e){console.warn('[rehydrate]',e);}
+  }catch(e){
+    console.warn('[rehydrate]',e);
+    // Show offline notice if API is unreachable
+    $('statusDot').className='tb-dot';
+    $('statusText').textContent='API offline — start server';
+    $('agentStatusText').textContent='Cannot reach API';
+  }
   finally{banner.classList.remove('show');}
 }
 
@@ -584,15 +464,19 @@ function handleUpload(files){
       if(!res.ok)throw new Error('ingest '+res.status);
       const data=await res.json();
       finalId=data.doc_id;
-      docs[finalId]={...docs[tempId],name:data.name||file.name,pages:data.pages};
+      docs[finalId]={...docs[tempId],name:data.name||file.name,pages:data.pages||1};
       delete docs[tempId];
+      // Update DOM references from tempId → finalId
       const el=document.querySelector(`.doc-item[data-doc="${tempId}"]`);
       if(el){el.dataset.doc=finalId;}
       const badge=$('badge_'+tempId);if(badge)badge.id='badge_'+finalId;
+      // If this doc was active, update activeDocId too
+      if(activeDocId===tempId){activeDocId=finalId;}
     }catch(e){
       console.error(e);docs[tempId].indexStatus='error';docs[tempId].errorMessage=String(e);
       setBadge(tempId,'error');updateStatus();return;
     }
+    // Cache PDF client-side for viewer
     if(file.type==='application/pdf'||file.name.endsWith('.pdf')){
       try{const ab=await file.arrayBuffer();const pd=await pdfjsLib.getDocument({data:ab}).promise;docs[finalId].pdfDoc=pd;docs[finalId].pages=pd.numPages;}catch(e){}
     }
@@ -619,7 +503,9 @@ function selectDocEl(el){
   document.querySelectorAll('.doc-item').forEach(d=>d.classList.remove('active'));
   el.classList.add('active');
   const newId=el.dataset.doc;const changed=newId!==activeDocId;
-  activeDocId=newId;currentPage=1;openViewer(changed);
+  activeDocId=newId;currentPage=1;
+  _updateActiveDocPill(); // ← reflect new selection in chat header
+  openViewer(changed);
 }
 
 function openViewer(needsFetch=false){
@@ -644,59 +530,187 @@ function showFallbackPlaceholder(doc){
   area.appendChild(wrap);
 }
 
+/* ── Render all pages (canvas only — highlights drawn on separate overlay) ── */
 async function renderAllPages(){
   const area=$('pdfScrollArea'),doc=docs[activeDocId];if(!doc)return;
   area.innerHTML='';
   if(doc.pdfDoc){
     const scale=zoomLevel/100;
     for(let p=1;p<=Math.min(doc.pages,30);p++){
-      const wrap=document.createElement('div');wrap.className='pdf-page-wrap';wrap.id='pdfPage_'+p;
+      const wrap=document.createElement('div');
+      wrap.className='pdf-page-wrap';wrap.id='pdfPage_'+p;
       const canvas=document.createElement('canvas');
-      const numBar=document.createElement('div');numBar.className='pdf-page-num-bar';numBar.textContent=`— ${p} —`;
-      wrap.appendChild(canvas);wrap.appendChild(numBar);area.appendChild(wrap);
-      (async(pn,c)=>{
+      canvas.id='pdfCanvas_'+p;
+      // Highlight overlay canvas — same size, drawn on top
+      const hlCanvas=document.createElement('canvas');
+      hlCanvas.className='pdf-hl-canvas';hlCanvas.id='pdfHl_'+p;
+      const numBar=document.createElement('div');
+      numBar.className='pdf-page-num-bar';numBar.textContent=`— ${p} —`;
+      wrap.appendChild(canvas);wrap.appendChild(hlCanvas);wrap.appendChild(numBar);
+      area.appendChild(wrap);
+      (async(pn,cv,hl)=>{
         try{
-          const page=await doc.pdfDoc.getPage(pn);const vp=page.getViewport({scale});
-          c.width=vp.width;c.height=vp.height;
-          await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
+          const page=await doc.pdfDoc.getPage(pn);
+          const vp=page.getViewport({scale});
+          cv.width=vp.width;cv.height=vp.height;
+          hl.width=vp.width;hl.height=vp.height;
+          await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+          cv._viewport=vp;
+          cv._pageView=page.view;
         }catch(e){}
-      })(p,canvas);
+      })(p,canvas,hlCanvas);
     }
   } else {showFallbackPlaceholder(doc);}
   scrollToPage(currentPage);
 }
 
-function scrollToPage(n){const el=$('pdfPage_'+n);if(el)el.scrollIntoView({behavior:'smooth',block:'start'});}
+/* ── Scroll to page — centers the page in the viewport ── */
+function scrollToPage(n){
+  const el=$('pdfPage_'+n);
+  if(!el)return;
+  const area=$('pdfScrollArea');
+  const areaH=area.clientHeight;
+  const elTop=el.offsetTop;
+  const elH=el.offsetHeight;
+  // Center the page: put middle of page at middle of viewport
+  area.scrollTo({top: elTop - (areaH/2) + (elH/2), behavior:'smooth'});
+}
+
 function prevPage(){if(!activeDocId||currentPage<=1)return;currentPage--;updatePageLabel();scrollToPage(currentPage);}
 function nextPage(){if(!activeDocId)return;const d=docs[activeDocId];if(currentPage>=d.pages)return;currentPage++;updatePageLabel();scrollToPage(currentPage);}
 function zoomIn(){if(zoomLevel<200){zoomLevel+=25;$('zoomLabel').textContent=zoomLevel+'%';if(activeDocId)renderAllPages();}}
 function zoomOut(){if(zoomLevel>50){zoomLevel-=25;$('zoomLabel').textContent=zoomLevel+'%';if(activeDocId)renderAllPages();}}
 
-function pulsePageWrap(p){const el=$('pdfPage_'+p);if(!el)return;el.classList.remove('pulse');void el.offsetWidth;el.classList.add('pulse');setTimeout(()=>el.classList.remove('pulse'),900);}
+/* ── Clear highlights — wipe all overlay canvases ── */
+function clearHighlights(){
+  document.querySelectorAll('.pdf-hl-canvas').forEach(c=>{
+    const ctx=c.getContext('2d');
+    ctx.clearRect(0,0,c.width,c.height);
+  });
+}
 
-function openSource(s){
+/*
+ * drawBboxHighlights
+ *
+ * MinerU bbox coords are in MinerU's internal coordinate space, which may
+ * differ from PDF points. The server returns mineru_page_w/h — the max
+ * extents of all content on that page — which represents MinerU's full
+ * page size. We scale bbox coords by (canvas_px / mineru_page_size) to
+ * map precisely onto the rendered canvas.
+ */
+function drawBboxHighlights(bboxItems){
+  if(!bboxItems||!bboxItems.length)return;
+
+  clearHighlights();
+
+  // Group by page, also capture mineru page dimensions per page
+  const byPage={};
+  const mineruPageSize={};
+  bboxItems.forEach(item=>{
+    const p=item.page_idx+1;
+    (byPage[p]=byPage[p]||[]).push(item);
+    if(item.mineru_page_w && item.mineru_page_h){
+      mineruPageSize[p]={w:item.mineru_page_w, h:item.mineru_page_h};
+    }
+  });
+
+  Object.entries(byPage).forEach(([pageStr,items])=>{
+    const pageNum=parseInt(pageStr);
+    const hlCanvas=$('pdfHl_'+pageNum);
+    const pdfCanvas=$('pdfCanvas_'+pageNum);
+    if(!hlCanvas||!pdfCanvas)return;
+
+    const tryDraw=(attempts=0)=>{
+      const vp=pdfCanvas._viewport;
+      if(!vp){
+        if(attempts<15)setTimeout(()=>tryDraw(attempts+1),200);
+        return;
+      }
+
+      const W=hlCanvas.width, H=hlCanvas.height;
+
+      // Compute scale factor: canvas pixels / MinerU coordinate units
+      // If MinerU page size is known, use it. Otherwise fall back to vp.scale.
+      const ms=mineruPageSize[pageNum];
+      const scaleX = ms && ms.w>0 ? W/ms.w : vp.scale;
+      const scaleY = ms && ms.h>0 ? H/ms.h : vp.scale;
+
+      console.log(`[bbox p${pageNum}] canvas=${W}x${H} mineruPage=${ms?.w}x${ms?.h} scaleX=${scaleX.toFixed(4)} scaleY=${scaleY.toFixed(4)}`);
+
+      const ctx=hlCanvas.getContext('2d');
+      ctx.clearRect(0,0,W,H);
+
+      items.forEach(item=>{
+        if(!item.bbox)return;
+        const [x0,y0,x1,y1]=item.bbox;
+
+        const pad=2;
+        const rx = Math.max(0, x0*scaleX - pad);
+        const ry = Math.max(0, y0*scaleY - pad);
+        const rx2= Math.min(W, x1*scaleX + pad);
+        const ry2= Math.min(H, y1*scaleY + pad);
+        const rw=rx2-rx, rh=ry2-ry;
+        if(rw<=0||rh<=0)return;
+
+        ctx.fillStyle='rgba(255,213,0,0.45)';
+        ctx.fillRect(rx,ry,rw,rh);
+        ctx.strokeStyle='rgba(180,130,0,0.70)';
+        ctx.lineWidth=1.5;
+        ctx.strokeRect(rx,ry,rw,rh);
+      });
+    };
+    tryDraw();
+  });
+}
+
+/* ── Open a source citation: switch doc, scroll to page center, draw highlights ── */
+async function openSource(s){
   if(!docs[s.doc_id])return;
   const changed=s.doc_id!==activeDocId;
   activeDocId=s.doc_id;currentPage=s.page||1;
+  _updateActiveDocPill();
   const el=document.querySelector(`.doc-item[data-doc="${s.doc_id}"]`);
   if(el){document.querySelectorAll('.doc-item').forEach(d=>d.classList.remove('active'));el.classList.add('active');}
-  openViewer(changed);
-  setTimeout(()=>pulsePageWrap(s.page||1),changed&&!docs[s.doc_id]?.pdfDoc?1200:500);
+
+  // Open/load the viewer
+  if(changed&&!docs[s.doc_id]?.pdfDoc){
+    openViewer(true);
+    await new Promise(r=>setTimeout(r,1400)); // wait for PDF to load
+  } else {
+    openViewer(false);
+    await new Promise(r=>setTimeout(r,80));
+  }
+
+  clearHighlights();
+  scrollToPage(s.page||1);
+
+  // Fetch bboxes from server using the full source_idx range of this chunk
+  const idxStart = s.source_idx_start ?? s.source_idx ?? -1;
+  const idxEnd   = s.source_idx ?? -1;
+  if(idxStart < 0 || idxEnd < 0){
+    console.warn('[highlight] no source_idx range on source', s);
+    return;
+  }
+
+  try{
+    const res=await fetch(`${API}/bbox/${s.doc_id}?start=${idxStart}&end=${idxEnd}`);
+    if(!res.ok)throw new Error('bbox '+res.status);
+    const bboxItems=await res.json();
+    drawBboxHighlights(bboxItems);
+  }catch(e){
+    console.warn('[highlight] bbox fetch failed:',e);
+  }
 }
 
 /* ══════════════════════════════════════════════════
    AGENT STATUS PANEL
    ══════════════════════════════════════════════════ */
+let _livePanelEl=null,_liveTodos=[],_searchItems=[],_panelOpen=true;
 
-let _livePanelEl = null;
-let _liveTodos   = [];
-let _searchItems = [];
-let _panelOpen   = true;
-
-function _createLivePanel() {
-  const panel = document.createElement('div');
-  panel.className = 'msg ai';
-  panel.innerHTML = `
+function _createLivePanel(){
+  const panel=document.createElement('div');
+  panel.className='msg ai';
+  panel.innerHTML=`
     <div class="msg-av ai">AI</div>
     <div class="msg-col" style="max-width:92%;width:100%">
       <div class="agent-status-panel" id="liveAspPanel">
@@ -714,98 +728,71 @@ function _createLivePanel() {
         <div class="asp-body" id="aspBody"></div>
       </div>
     </div>`;
-
-  panel.querySelector('#aspToggle').onclick = () => {
-    _panelOpen = !_panelOpen;
-    panel.querySelector('#aspBody').classList.toggle('collapsed', !_panelOpen);
-    panel.querySelector('#aspChevron').classList.toggle('open', _panelOpen);
+  panel.querySelector('#aspToggle').onclick=()=>{
+    _panelOpen=!_panelOpen;
+    panel.querySelector('#aspBody').classList.toggle('collapsed',!_panelOpen);
+    panel.querySelector('#aspChevron').classList.toggle('open',_panelOpen);
   };
-
-  const ce = $('chatEmpty'); if (ce) ce.remove();
+  const ce=$('chatEmpty');if(ce)ce.remove();
   $('chatMessages').appendChild(panel);
   scrollBottom();
-  _livePanelEl = panel;
-  _liveTodos   = [];
-  _searchItems = [];
-  _panelOpen   = true;
+  _livePanelEl=panel;_liveTodos=[];_searchItems=[];_panelOpen=true;
 }
 
-function _renderLivePanel() {
-  if (!_livePanelEl) return;
-  const body = _livePanelEl.querySelector('#aspBody');
-  if (!body) return;
-
-  const activeIdx = _liveTodos.findIndex(t => !['completed','done'].includes(t.status));
-
-  const todoHTML = _liveTodos.map((t, i) => {
-    const isDone = ['completed','done'].includes(t.status);
-    const isActive = !isDone && i === activeIdx;
-    const cls = isDone ? 'done' : isActive ? 'active' : '';
-    return `
-      <div class="asp-todo ${cls}">
-        <div class="asp-todo-icon">
-          <span class="asp-todo-check">✓</span>
-          ${isActive ? '<span class="asp-todo-spinner spin"></span>' : ''}
-        </div>
-        <span class="asp-todo-text">${_escHtml(t.title)}</span>
-      </div>`;
+function _renderLivePanel(){
+  if(!_livePanelEl)return;
+  const body=_livePanelEl.querySelector('#aspBody');if(!body)return;
+  const activeIdx=_liveTodos.findIndex(t=>!['completed','done'].includes(t.status));
+  const todoHTML=_liveTodos.map((t,i)=>{
+    const isDone=['completed','done'].includes(t.status);
+    const isActive=!isDone&&i===activeIdx;
+    const cls=isDone?'done':isActive?'active':'';
+    return `<div class="asp-todo ${cls}">
+      <div class="asp-todo-icon">
+        <span class="asp-todo-check">✓</span>
+        ${isActive?'<span class="asp-todo-spinner spin"></span>':''}
+      </div>
+      <span class="asp-todo-text">${_escHtml(t.title)}</span>
+    </div>`;
   }).join('');
-
-  const searchHTML = _searchItems.map(s => `
-    <div class="asp-search ${s.done ? 'done' : ''}">
-      <span class="asp-search-icon">${s.done ? '✓' : '🔍'}</span>
-      <span class="asp-search-text">${s.done ? 'Retrieved: ' : 'Searching: '}"${_escHtml(s.query)}"</span>
+  const searchHTML=_searchItems.map(s=>`
+    <div class="asp-search ${s.done?'done':''}">
+      <span class="asp-search-icon">${s.done?'✓':'🔍'}</span>
+      <span class="asp-search-text">${s.done?'Retrieved: ':'Searching: '}"${_escHtml(s.query)}"</span>
     </div>`).join('');
-
-  body.innerHTML = todoHTML + searchHTML;
+  body.innerHTML=todoHTML+searchHTML;
   scrollBottom();
 }
 
-function _updatePanelTitle(title) {
-  if (!_livePanelEl) return;
-  const el = _livePanelEl.querySelector('.asp-header-title');
-  if (el) el.textContent = title;
+function _updatePanelTitle(title){
+  if(!_livePanelEl)return;
+  const el=_livePanelEl.querySelector('.asp-header-title');if(el)el.textContent=title;
 }
 
-function _finalizeLivePanel(answer, sources) {
-  if (!_livePanelEl) return;
-  const panel = _livePanelEl;
-
-  const header = panel.querySelector('.asp-header-title');
-  if (header) header.textContent = 'Agent completed';
-  const chevron = panel.querySelector('.asp-chevron');
-  if (chevron) {chevron.classList.remove('open'); _panelOpen = false;}
-  const body = panel.querySelector('#aspBody');
-  if (body) body.classList.add('collapsed');
-
-  if (_liveTodos.length) {
-    _liveTodos = _liveTodos.map(t => ({...t, status:'completed'}));
-    body.classList.remove('collapsed'); _renderLivePanel(); body.classList.add('collapsed');
+function _finalizeLivePanel(answer,sources){
+  if(!_livePanelEl)return;
+  const panel=_livePanelEl;
+  const header=panel.querySelector('.asp-header-title');if(header)header.textContent='Agent completed';
+  const chevron=panel.querySelector('.asp-chevron');
+  if(chevron){chevron.classList.remove('open');_panelOpen=false;}
+  const body=panel.querySelector('#aspBody');
+  if(body)body.classList.add('collapsed');
+  if(_liveTodos.length){
+    _liveTodos=_liveTodos.map(t=>({...t,status:'completed'}));
+    body.classList.remove('collapsed');_renderLivePanel();body.classList.add('collapsed');
   }
-
-  _livePanelEl = null;
-
-  // ── Render markdown in the answer before inserting ──
-  addMessage('ai', answer, sources);
+  _livePanelEl=null;
+  addMessage('ai',answer,sources);
 }
 
-function _escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
-}
+function _escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 /* ── CHAT MESSAGES ── */
-function addMessage(role, text, sources) {
+function addMessage(role,text,sources){
   const ce=$('chatEmpty');if(ce)ce.remove();
   const c=$('chatMessages'),div=document.createElement('div');
   div.className='msg '+role;
-
-  // For AI messages, render markdown; for user messages, escape and preserve newlines
-  const bubbleContent = role === 'ai'
-    ? renderMarkdown(text)
-    : _escHtml(text).replace(/\n/g, '<br>');
-
+  const bubbleContent=role==='ai'?renderMarkdown(text):_escHtml(text).replace(/\n/g,'<br>');
   let srcHTML='';
   if(sources&&sources.length){
     srcHTML='<div class="msg-sources">'+sources.map(s=>`<span class="src-tag" onclick='openSource(${JSON.stringify(s)})'>📄 ${s.label}</span>`).join('')+'</div>';
@@ -815,102 +802,80 @@ function addMessage(role, text, sources) {
 }
 
 /* ── SEND (SSE) ── */
-async function sendQuestion() {
-  if (isLoading) return;
-  const input = $('questionInput'), q = input.value.trim();
-  if (!q) return;
-  const ready = indexedIds(); if (ready.length === 0) return;
+async function sendQuestion(){
+  if(isLoading)return;
+  const input=$('questionInput'),q=input.value.trim();
+  if(!q)return;
+  const ready=indexedIds();if(ready.length===0)return;
 
-  input.value = ''; autoResize(input);
-  addMessage('user', q, null);
+  input.value='';autoResize(input);
+  addMessage('user',q,null);
 
-  isLoading = true;
-  const btn = $('sendBtn');
-  btn.disabled = true; btn.style.opacity = '0.5';
+  isLoading=true;
+  const btn=$('sendBtn');
+  btn.disabled=true;btn.style.opacity='0.5';
 
   _createLivePanel();
   _updatePanelTitle('Agent is thinking…');
 
-  try {
-    const res = await fetch(BACKEND_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q, doc_ids: ready }),
+  try{
+    const res=await fetch(BACKEND_URL,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      // ← Pass selected_doc_id so the backend knows which document to search
+      body:JSON.stringify({question:q, doc_ids:ready, selected_doc_id:activeDocId||ready[0]}),
     });
+    if(!res.ok)throw new Error('Server '+res.status);
+    if(!res.body)throw new Error('No response body');
 
-    if (!res.ok) throw new Error('Server ' + res.status);
-    if (!res.body) throw new Error('No response body');
+    const reader=res.body.getReader();
+    const decoder=new TextDecoder();
+    let buf='';
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      const parts = buf.split('\n\n');
-      buf = parts.pop();
-
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith('data:')) continue;
-        let evt;
-        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        _handleAgentEvent(evt, q);
+    while(true){
+      const{value,done}=await reader.read();
+      if(done)break;
+      buf+=decoder.decode(value,{stream:true});
+      const parts=buf.split('\n\n');
+      buf=parts.pop();
+      for(const part of parts){
+        const line=part.trim();
+        if(!line.startsWith('data:'))continue;
+        let evt;try{evt=JSON.parse(line.slice(5).trim());}catch{continue;}
+        _handleAgentEvent(evt,q);
       }
     }
-
-  } catch (err) {
-    if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
-    addMessage('ai',
-      `Could not reach backend at \`${BACKEND_URL}\`.\nIs the FastAPI server running?`,
-      []);
-  } finally {
-    isLoading = false;
-    btn.disabled = false; btn.style.opacity = '1';
+  }catch(err){
+    if(_livePanelEl){_livePanelEl.remove();_livePanelEl=null;}
+    addMessage('ai',`Could not reach backend at \`${BACKEND_URL}\`.\nIs the FastAPI server running?\n\n\`uvicorn server:app --reload --port 8000\``,[]);
+  }finally{
+    isLoading=false;btn.disabled=false;btn.style.opacity='1';
   }
 }
 
-function _handleAgentEvent(evt, question) {
-  switch (evt.type) {
-
-    case 'todos': {
-      const incoming = evt.todos || [];
-      _liveTodos = incoming.map((t, i) => {
-        const existing = _liveTodos[i];
-        return existing ? { ...t, status: t.status || existing.status } : t;
+function _handleAgentEvent(evt,question){
+  switch(evt.type){
+    case 'todos':{
+      const incoming=evt.todos||[];
+      _liveTodos=incoming.map((t,i)=>{
+        const existing=_liveTodos[i];
+        return existing?{...t,status:t.status||existing.status}:t;
       });
-      _updatePanelTitle('Planning…');
-      _renderLivePanel();
-      break;
+      _updatePanelTitle('Planning…');_renderLivePanel();break;
     }
-
-    case 'searching': {
+    case 'searching':{
       _updatePanelTitle('Searching documents…');
-      _searchItems.push({ query: evt.query, done: false });
-      _renderLivePanel();
-      break;
+      _searchItems.push({query:evt.query,done:false});
+      _renderLivePanel();break;
     }
-
-    case 'retrieved': {
-      const last = [..._searchItems].reverse().find(s => !s.done);
-      if (last) last.done = true;
-      _updatePanelTitle('Generating answer…');
-      _renderLivePanel();
-      break;
+    case 'retrieved':{
+      const last=[..._searchItems].reverse().find(s=>!s.done);if(last)last.done=true;
+      _updatePanelTitle('Generating answer…');_renderLivePanel();break;
     }
-
-    case 'answer': {
-      _finalizeLivePanel(evt.answer || '', evt.sources || []);
-      break;
-    }
-
-    case 'error': {
-      if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
-      addMessage('ai', `⚠ ${evt.message || 'Unknown error'}`, []);
-      break;
+    case 'answer':{_finalizeLivePanel(evt.answer||'',evt.sources||[]);break;}
+    case 'error':{
+      if(_livePanelEl){_livePanelEl.remove();_livePanelEl=null;}
+      addMessage('ai',`⚠ ${evt.message||'Unknown error'}`,[]);break;
     }
   }
 }
@@ -934,4 +899,4 @@ makeResizable('rh2','paneChat','right');
 rehydrateDocs();
 </script>
 </body>
-</html>
+</html> 

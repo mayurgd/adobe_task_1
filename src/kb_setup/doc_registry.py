@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-_REGISTRY_PATH = Path(__file__).parent.parent / "data" / "doc_registry.json"
+_REGISTRY_PATH = Path(__file__).parent.parent.parent / "data" / "doc_registry.json"
 
 
 def collection_name_for(filename: str) -> str:

@@ -13,9 +13,7 @@ Public API:
 """
 
 from __future__ import annotations
-
 import json
-
 import chromadb
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
