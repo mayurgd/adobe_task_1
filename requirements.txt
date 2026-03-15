@@ -1,0 +1,32 @@
+# ── Web server 
+fastapi
+uvicorn[standard]
+python-multipart
+
+# ── LLM / agent 
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langchain-text-splitters
+
+# ── Embeddings / reranking 
+sentence-transformers
+
+# ── Vector store 
+chromadb
+
+# ── PDF parsing 
+pypdf                  
+
+# ── Data / config 
+pydantic
+pydantic-settings
+python-dotenv
+pandas            
+
+# ── Observability (optional — Langfuse tracing) 
+langfuse
+
+# ── Rich CLI output
+rich
