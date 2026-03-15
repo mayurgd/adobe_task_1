@@ -29,7 +29,7 @@ Create a `.env` file in the project root:
 OPENAI_API_KEY=sk-...
 
 # Optional
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-4o
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
 ```
@@ -120,7 +120,7 @@ All settings are in `src/config.py` and can be overridden via `.env`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENAI_API_KEY` | — | Required |
-| `OPENAI_MODEL` | `gpt-4o-mini` | LLM for answer generation |
+| `OPENAI_MODEL` | `gpt-4o` | LLM for answer generation |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Bi-encoder for indexing |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker |
 | `MINERU_OUTPUT_DIR` | `data/docs/outputs` | MinerU parse output location |

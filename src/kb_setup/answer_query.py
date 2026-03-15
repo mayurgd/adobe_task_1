@@ -6,7 +6,7 @@ End-to-end RAG pipeline for CFO-level document Q&A.
 Pipeline
 --------
 1. Retrieve top-k chunks from the document's ChromaDB collection.
-2. Generate a CFO-grade markdown answer via the LLM (GPT-4o-mini by default).
+2. Generate a CFO-grade markdown answer via the LLM (gpt-4o by default).
 3. A second LLM call identifies which [Source N] numbers were actually used.
 4. Return a JSON-serialisable dict ready for frontend consumption.
 
