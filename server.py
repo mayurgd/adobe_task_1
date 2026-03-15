@@ -27,10 +27,12 @@ import asyncio
 import json
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
+import chromadb
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,9 +52,9 @@ from kb_setup.chunker import build_chunks
 from kb_setup.doc_registry import collection_name_for, list_all, register
 from kb_setup.indexer import load_embedding_model
 
-# ── Paths (mirrors app.py exactly) ───────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 DOCS_INPUT_DIR = ROOT / "data" / "docs" / "inputs"
-DOCS_OUTPUT_DIR = Path(settings.mineru_output_dir)  # data/docs/outputs
+DOCS_OUTPUT_DIR = Path(settings.mineru_output_dir)
 REGISTRY_PATH = ROOT / "data" / "registry.json"
 
 DOCS_INPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,22 +71,48 @@ app.add_middleware(
 )
 
 # ── In-memory state ───────────────────────────────────────────────────────────
-# doc_registry: { doc_id: { name, path, pages, collection_name } }
-# job_status:   { doc_id: { status, message } }
 doc_registry: dict[str, dict] = {}
 job_status: dict[str, dict] = {}
 
+# ── Singleton ChromaDB client ─────────────────────────────────────────────────
+# Creating a new PersistentClient() on every request races the Rust bindings
+# initialisation and causes "RustBindingsAPI object has no attribute 'bindings'".
+# One shared client + one lock for all write operations is the correct pattern.
+_chroma_client: chromadb.PersistentClient | None = None
+_chroma_lock = threading.Lock()
+
+
+def _get_chroma_client() -> chromadb.PersistentClient:
+    global _chroma_client
+    if _chroma_client is not None:
+        return _chroma_client
+    with _chroma_lock:
+        if _chroma_client is None:
+            _chroma_client = chromadb.PersistentClient(path=settings.chroma_db_path)
+    return _chroma_client
+
+
+# ── Embedding model singleton + thread lock ───────────────────────────────────
+# SentenceTransformer is NOT thread-safe: calling encode() from two threads
+# simultaneously causes a "Cannot copy out of meta tensor" torch crash.
+# _embed_model_lock serialises every encode() call so parallel agent tool
+# invocations (e.g. two answer_from_documents calls in the same turn) are
+# queued rather than raced.
 _embed_model = None
+_embed_model_lock = threading.Lock()
 
 
 def _get_embed_model():
     global _embed_model
-    if _embed_model is None:
-        _embed_model = load_embedding_model()
+    if _embed_model is not None:
+        return _embed_model
+    with _embed_model_lock:
+        if _embed_model is None:
+            _embed_model = load_embedding_model()
     return _embed_model
 
 
-# ── Registry persistence (same as app.py) ────────────────────────────────────
+# ── Registry persistence ──────────────────────────────────────────────────────
 
 
 def _load_registry() -> None:
@@ -106,7 +134,6 @@ def _load_registry() -> None:
                 "collection_name", collection_name_for(entry["name"])
             )
             js = raw_status.get(doc_id, {"status": "indexed", "message": "Restored."})
-            # Anything that was mid-flight when server died → error
             if js["status"] == "processing":
                 js = {
                     "status": "error",
@@ -127,7 +154,6 @@ def _save_registry() -> None:
             ser_registry[doc_id] = {
                 **entry,
                 "path": str(entry["path"]),
-                # Ensure unified fields are always present
                 "chunk_count": entry.get("chunk_count", 0),
                 "indexed_at": entry.get("indexed_at", ""),
             }
@@ -158,30 +184,22 @@ def _set_status(doc_id: str, status: str, message: str) -> None:
 async def _startup() -> None:
     print("[startup] Loading registry …")
     _load_registry()
+    print("[startup] Initialising ChromaDB client …")
+    _get_chroma_client()
     print("[startup] Warming up embedding model …")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _get_embed_model)
     print("[startup] Ready.")
 
 
-# ── Background pipeline (mirrors app.py _run_pipeline exactly) ───────────────
+# ── Background pipeline ───────────────────────────────────────────────────────
 
 
 def _run_pipeline(doc_id: str, file_path: Path) -> None:
-    """
-    Runs in a thread-pool worker via BackgroundTasks.
-
-    Steps:
-      1. mineru subprocess  →  <stem>/auto/<stem>_content_list.json
-      2. build_chunks
-      3. embed + upsert into per-doc ChromaDB collection
-      4. register in kb_setup doc_registry
-    """
     original_name = doc_registry[doc_id]["name"]
     coll_name = collection_name_for(original_name)
 
     try:
-        # ── Step 1: MinerU ────────────────────────────────────────────────────
         _set_status(doc_id, "processing", "Running MinerU parser …")
 
         cmd = [
@@ -199,7 +217,6 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
                 f"MinerU exited {result.returncode}.\nstderr: {result.stderr[-800:]}"
             )
 
-        # MinerU writes to: <output_dir>/<stem>/auto/<stem>_content_list.json
         stem = file_path.stem
         content_list_path = (
             DOCS_OUTPUT_DIR / stem / "auto" / f"{stem}_content_list.json"
@@ -210,7 +227,6 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
                 f"stdout: {result.stdout[-400:]}"
             )
 
-        # ── Step 2: Chunk ─────────────────────────────────────────────────────
         _set_status(doc_id, "processing", "Chunking document …")
         with open(content_list_path, encoding="utf-8") as f:
             content = json.load(f)
@@ -221,31 +237,30 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
                 "No chunks produced — document may be empty or unreadable."
             )
 
-        # ── Step 3: Embed + index into per-doc ChromaDB collection ────────────
         _set_status(doc_id, "processing", f"Embedding {len(chunks)} chunks …")
 
         model = _get_embed_model()
         embed_texts = [c["embed_text"] for c in chunks]
-        embeddings = model.encode(
-            embed_texts,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            batch_size=settings.embed_batch_size,
-        ).tolist()
 
-        import chromadb as _chromadb
+        with _embed_model_lock:
+            embeddings = model.encode(
+                embed_texts,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=settings.embed_batch_size,
+            ).tolist()
 
-        client = _chromadb.PersistentClient(path=settings.chroma_db_path)
-
-        # Always recreate so re-uploads are clean
-        try:
-            client.delete_collection(coll_name)
-        except Exception:
-            pass
-        collection = client.create_collection(
-            name=coll_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        # Use the singleton client — never create a new PersistentClient here
+        client = _get_chroma_client()
+        with _chroma_lock:
+            try:
+                client.delete_collection(coll_name)
+            except Exception:
+                pass
+            collection = client.create_collection(
+                name=coll_name,
+                metadata={"hnsw:space": "cosine"},
+            )
 
         ids = [c["id"] for c in chunks]
         metadatas = [
@@ -275,10 +290,8 @@ def _run_pipeline(doc_id: str, file_path: Path) -> None:
             )
             _set_status(doc_id, "processing", f"Storing chunks … {end}/{len(chunks)}")
 
-        # ── Step 4: Register in kb_setup doc_registry ─────────────────────────
         register(original_name, coll_name, len(chunks))
 
-        # Update page count from chunks (0-indexed pages → +1)
         all_pages = {p for c in chunks for p in c.get("pages", [])}
         if all_pages:
             doc_registry[doc_id]["pages"] = max(all_pages) + 1
@@ -299,19 +312,18 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-# ── /ask — SSE stream with live todos ────────────────────────────────────────
+# ── /ask ──────────────────────────────────────────────────────────────────────
 
 
 class AskRequest(BaseModel):
     question: str
     doc_ids: list[str]
-    selected_doc_id: str | None = None  # whichever doc is open in the viewer
+    selected_doc_id: str | None = None
 
 
 def _resolve_target(
     doc_ids: list[str], selected_doc_id: str | None
 ) -> tuple[str | None, str]:
-    """Return (target_id, error_message). error_message is '' if ok."""
     target_id = selected_doc_id if selected_doc_id in doc_registry else None
     if target_id is None:
         target_id = next(
@@ -330,16 +342,9 @@ def _resolve_target(
 def _build_sources(
     cited_sources: list[dict], target_id: str, coll_name: str
 ) -> list[dict]:
-    """
-    Convert answer_query cited_sources into UI source refs.
-    Enriches each with source_idx_start + source_idx from ChromaDB metadata
-    so the frontend can highlight the full bounding box range of the chunk.
-    """
     try:
-        import chromadb as _chromadb
-
-        _client = _chromadb.PersistentClient(path=settings.chroma_db_path)
-        _coll = _client.get_collection(coll_name)
+        client = _get_chroma_client()
+        _coll = client.get_collection(coll_name)
         for cs in cited_sources:
             try:
                 rows = _coll.get(
@@ -350,7 +355,6 @@ def _build_sources(
                 if rows["metadatas"]:
                     m = rows["metadatas"][0]
                     cs["source_idx"] = m.get("source_idx", -1)
-                    # source_idx_start may be missing in older indexed docs — fall back to source_idx
                     cs["source_idx_start"] = m.get("source_idx_start", cs["source_idx"])
             except Exception:
                 cs.setdefault("source_idx", -1)
@@ -361,7 +365,7 @@ def _build_sources(
     sources = []
     for s in cited_sources:
         raw_page = s["pages"][0] if s.get("pages") else 0
-        page = raw_page + 1  # MinerU is 0-indexed, viewer is 1-indexed
+        page = raw_page + 1
         sources.append(
             {
                 "doc_id": target_id,
@@ -392,13 +396,13 @@ async def ask(req: AskRequest):
         doc_name = entry["name"]
         coll_name = entry.get("collection_name") or collection_name_for(doc_name)
 
-        # ── Try real agent path first ─────────────────────────────────────────
         try:
             from langchain_core.tools import tool as lc_tool
             from langchain_openai import ChatOpenAI
             from streaming import stream_agent_turn
 
-            # Build a doc-scoped answer_from_documents tool for this request
+            _all_results_store: list[dict] = []
+
             @lc_tool
             def answer_from_documents(query: str) -> str:
                 """Retrieve a grounded answer from the selected document."""
@@ -409,14 +413,9 @@ async def ask(req: AskRequest):
                         f"  [Source {s['number']}] {s['heading']} | "
                         f"pages {s['pages']} | score {s['score']:.3f}"
                     )
-                # Stash full result on the function for later source extraction
-                answer_from_documents._last_result = result
+                _all_results_store.append(result)
                 return "\n".join(lines)
 
-            answer_from_documents._last_result = None
-
-            # Try importing the agent factory — use deepagents if available,
-            # fall back to langchain create_react_agent
             try:
                 from deepagents import create_deep_agent
                 from agent import SYSTEM_PROMPT as _SYSTEM_PROMPT
@@ -430,7 +429,6 @@ async def ask(req: AskRequest):
             except ImportError:
                 from langchain.agents import create_react_agent, AgentExecutor
                 from langchain import hub
-                from langchain_openai import ChatOpenAI
 
                 llm = ChatOpenAI(model=settings.openai_model, temperature=0)
                 prompt = hub.pull("hwchase17/react")
@@ -445,9 +443,16 @@ async def ask(req: AskRequest):
             async def _run_agent():
                 try:
                     reply = await stream_agent_turn(agent, conversation, event_queue=q)
-                    # Extract sources from the last tool call result
-                    last = answer_from_documents._last_result
-                    cited = last["cited_sources"] if last else []
+
+                    cited: list[dict] = []
+                    seen: set[tuple] = set()
+                    for r in _all_results_store:
+                        for s in r.get("cited_sources", []):
+                            key = (s["heading"], tuple(s["pages"]))
+                            if key not in seen:
+                                seen.add(key)
+                                cited.append(s)
+
                     sources = _build_sources(cited, target_id, coll_name)
                     await q.put({"type": "answer", "answer": reply, "sources": sources})
                 except Exception as exc:
@@ -463,7 +468,6 @@ async def ask(req: AskRequest):
                     break
                 yield _sse(event)
 
-        # ── Fallback: plain RAG with simulated progress ───────────────────────
         except ImportError:
             yield _sse({"type": "searching", "query": req.question})
             try:
@@ -472,16 +476,12 @@ async def ask(req: AskRequest):
                     None,
                     lambda: answer_query(req.question, collection_name=coll_name),
                 )
-                yield _sse({"type": "retrieved"})
+                yield _sse({"type": "retrieved", "query": req.question})
                 sources = _build_sources(
                     result.get("cited_sources", []), target_id, coll_name
                 )
                 yield _sse(
-                    {
-                        "type": "answer",
-                        "answer": result["answer"],
-                        "sources": sources,
-                    }
+                    {"type": "answer", "answer": result["answer"], "sources": sources}
                 )
             except Exception as exc:
                 yield _sse({"type": "error", "message": str(exc)})
@@ -489,10 +489,7 @@ async def ask(req: AskRequest):
     return StreamingResponse(
         generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -501,10 +498,6 @@ async def ask(req: AskRequest):
 
 @app.post("/ingest")
 async def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """
-    Save file to data/docs/inputs/, kick off MinerU pipeline in background.
-    Returns immediately with status='processing'.
-    """
     allowed = {".pdf", ".docx", ".txt"}
     suffix = Path(file.filename).suffix.lower()
     if suffix not in allowed:
@@ -512,8 +505,6 @@ async def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)
 
     doc_id = str(uuid.uuid4())
     original_name = file.filename or f"document_{doc_id}"
-
-    # Prefix with doc_id so filenames never collide (same pattern as app.py)
     safe_stem = f"{doc_id}_{Path(original_name).stem}"
     dest = DOCS_INPUT_DIR / f"{safe_stem}{suffix}"
 
@@ -563,12 +554,7 @@ async def get_status(doc_id: str):
 
 @app.get("/docs-list")
 async def list_docs():
-    """
-    Returns all documents from the unified registry.json.
-    No second file to merge — doc_registry.py now reads the same registry.json.
-    """
     result = []
-
     for doc_id, entry in doc_registry.items():
         js = job_status.get(doc_id, {"status": "unknown", "message": ""})
         result.append(
@@ -580,7 +566,6 @@ async def list_docs():
                 "message": js.get("message", ""),
             }
         )
-
     return result
 
 
@@ -615,16 +600,6 @@ async def health():
 
 
 # ── /bbox/{doc_id} ────────────────────────────────────────────────────────────
-# Returns bounding boxes for every content_list item in [source_idx_start, source_idx_end].
-# This covers the full chunk — heading, all paragraphs, tables, images.
-#
-# Query params:
-#   start  — first source_idx in the chunk range (inclusive)
-#   end    — last source_idx in the chunk range (inclusive)
-#
-# Returns:
-#   [ { source_idx, page_idx, bbox: [x0,y0,x1,y1], type }, ... ]
-#   bbox is in PDF points — same coordinate space as pdf.js viewport transform.
 
 
 @app.get("/bbox/{doc_id}")
@@ -644,12 +619,9 @@ async def get_bbox(
     if start < 0 or end < start:
         raise HTTPException(400, f"Invalid range: start={start} end={end}")
 
-    # Compute MinerU's page dimensions by scanning ALL items on the same page(s)
-    # as the requested chunk. Max x1/y1 across all items = MinerU's page size.
     target_pages: set[int] = set()
     for idx in range(start, min(end + 1, len(content_list))):
-        p = content_list[idx].get("page_idx", 0)
-        target_pages.add(p)
+        target_pages.add(content_list[idx].get("page_idx", 0))
 
     page_sizes: dict[int, dict] = {}
     for item in content_list:
@@ -677,7 +649,6 @@ async def get_bbox(
                 "page_idx": p,
                 "bbox": bbox,
                 "type": item.get("type", "text"),
-                # MinerU coordinate space size for this page
                 "mineru_page_w": page_sizes.get(p, {}).get("w", 0),
                 "mineru_page_h": page_sizes.get(p, {}).get("h", 0),
             }
@@ -687,11 +658,9 @@ async def get_bbox(
 
 
 def _extract_bbox(item: dict) -> list[float] | None:
-    """Extract [x0, y0, x1, y1] from a MinerU content_list item."""
     bbox = item.get("bbox") or item.get("bounding_box")
     if bbox and len(bbox) == 4:
         return [float(v) for v in bbox]
-    # Some MinerU versions use a polygon: [x0,y0, x1,y0, x1,y1, x0,y1]
     poly = item.get("poly")
     if poly and len(poly) >= 4:
         xs = [float(poly[i]) for i in range(0, len(poly), 2)]
@@ -701,23 +670,15 @@ def _extract_bbox(item: dict) -> list[float] | None:
 
 
 def _load_content_list(doc_id: str, entry: dict) -> list | None:
-    """
-    Find and load the _content_list.json for a document.
-    Looks in the MinerU output directory using the original filename stem.
-    """
     original_name = entry.get("name", "")
     file_path = Path(entry.get("path", ""))
-
-    # The file saved to inputs is named  <doc_id>_<original_stem><suffix>
-    # MinerU output dir is keyed on that same full stem
-    stem = file_path.stem  # e.g. "abc123_myreport"
+    stem = file_path.stem
 
     candidate = DOCS_OUTPUT_DIR / stem / "auto" / f"{stem}_content_list.json"
     if candidate.exists():
         with open(candidate, encoding="utf-8") as f:
             return json.load(f)
 
-    # Fallback: search by original name stem (for docs indexed before this server)
     orig_stem = Path(original_name).stem
     for path in DOCS_OUTPUT_DIR.rglob(f"{orig_stem}_content_list.json"):
         with open(path, encoding="utf-8") as f:
@@ -726,7 +687,7 @@ def _load_content_list(doc_id: str, entry: dict) -> list | None:
     return None
 
 
-# ── Static files — serve index.html  (MUST be mounted last) ──────────────────
+# ── Static files ──────────────────────────────────────────────────────────────
 _index_html = ROOT / "index.html"
 if _index_html.exists():
     app.mount("/", StaticFiles(directory=str(ROOT), html=True), name="static")

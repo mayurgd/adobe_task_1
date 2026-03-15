@@ -13,7 +13,10 @@ Public API:
 """
 
 from __future__ import annotations
+
 import json
+import threading
+
 import chromadb
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -21,23 +24,46 @@ from config import settings
 
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
-# ── Model singletons (expensive to load, shared across calls) ─────────────────
+# ── Model singletons ──────────────────────────────────────────────────────────
 _model: SentenceTransformer | None = None
 _reranker: CrossEncoder | None = None
+
+# Serialises encode() + predict() — SentenceTransformer/CrossEncoder are not
+# thread-safe when called concurrently (causes "Cannot copy out of meta tensor").
+_model_lock = threading.Lock()
+
+# ── ChromaDB singleton ────────────────────────────────────────────────────────
+# Creating a new PersistentClient() on every call races the Rust bindings
+# initialisation ("RustBindingsAPI object has no attribute 'bindings'").
+# One shared client is the correct pattern for a long-running server process.
+_chroma_client: chromadb.PersistentClient | None = None
+_chroma_init_lock = threading.Lock()
+
+
+def _get_chroma_client() -> chromadb.PersistentClient:
+    global _chroma_client
+    if _chroma_client is not None:
+        return _chroma_client
+    with _chroma_init_lock:
+        if _chroma_client is None:
+            _chroma_client = chromadb.PersistentClient(path=settings.chroma_db_path)
+    return _chroma_client
 
 
 def _get_models() -> tuple[SentenceTransformer, CrossEncoder]:
     global _model, _reranker
-    if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
-    if _reranker is None:
-        _reranker = CrossEncoder(settings.reranker_model)
+    if _model is not None and _reranker is not None:
+        return _model, _reranker
+    with _model_lock:
+        if _model is None:
+            _model = SentenceTransformer(settings.embedding_model)
+        if _reranker is None:
+            _reranker = CrossEncoder(settings.reranker_model)
     return _model, _reranker
 
 
 def _get_collection(collection_name: str) -> chromadb.Collection:
-    client = chromadb.PersistentClient(path=settings.chroma_db_path)
-    return client.get_collection(collection_name)
+    return _get_chroma_client().get_collection(collection_name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,20 +74,18 @@ def query_documents(
     collection_name: str,
     top_k: int | None = None,
 ) -> list[dict]:
-    """Query a single document's collection.
-
-    Args:
-        query:           Natural-language question.
-        collection_name: Collection name from doc_registry.collection_name_for().
-        top_k:           Chunks to return (default: settings.default_top_k).
-    """
+    """Query a single document's collection."""
     k = top_k or settings.default_top_k
     fetch_k = max(settings.retrieval_candidate_k, k)
     model, reranker = _get_models()
     collection = _get_collection(collection_name)
 
-    # Stage 1 — semantic search
-    q_emb = model.encode([BGE_QUERY_PREFIX + query], normalize_embeddings=True).tolist()
+    # Stage 1 — semantic search (encode under lock — not thread-safe)
+    with _model_lock:
+        q_emb = model.encode(
+            [BGE_QUERY_PREFIX + query], normalize_embeddings=True
+        ).tolist()
+
     results = collection.query(
         query_embeddings=q_emb,
         n_results=fetch_k,
@@ -70,9 +94,7 @@ def query_documents(
 
     # Stage 2 — hydrate
     candidates = []
-    for i, (meta, dist) in enumerate(
-        zip(results["metadatas"][0], results["distances"][0])
-    ):
+    for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
         candidates.append(
             {
                 "score": round(1 - dist, 4),
@@ -84,14 +106,15 @@ def query_documents(
             }
         )
 
-    # Stage 3 — rerank
+    # Stage 3 — rerank (predict under lock — not thread-safe)
     pairs = [(query, _rerank_text(c)) for c in candidates]
-    scores = reranker.predict(pairs).tolist()
+    with _model_lock:
+        scores = reranker.predict(pairs).tolist()
+
     for c, s in zip(candidates, scores):
         c["score"] = round(s, 4)
     candidates.sort(key=lambda c: c["score"], reverse=True)
 
-    # Drop negatives (cross-encoder: negative = not relevant)
     candidates = [c for c in candidates if c["score"] >= 0] or candidates[:1]
 
     for rank, c in enumerate(candidates[:k], start=1):
@@ -100,7 +123,6 @@ def query_documents(
 
 
 def format_chunks_as_context(chunks: list[dict]) -> str:
-    """Serialise chunks into a labelled context string for the LLM."""
     parts = []
     for chunk in chunks:
         header = f"[heading: {chunk['heading']} | pages: {chunk['pages']}]"
@@ -134,8 +156,6 @@ def _rerank_text(chunk: dict) -> str:
     for t in chunk.get("tables", []):
         lines = [l for l in t.get("text", "").splitlines() if l.strip()]
         col_headers = t.get("col_headers", "")
-        # If pandas assigned auto-integer headers (e.g. "0 | 1 | 2"), skip them
-        # and treat the first plain-text line as the header instead
         if col_headers and all(p.strip().isdigit() for p in col_headers.split("|")):
             col_headers = lines[0] if lines else ""
             data_lines = lines[1:3]

@@ -882,29 +882,53 @@ async function sendQuestion(){
   }
 }
 
-function _handleAgentEvent(evt,question){
-  switch(evt.type){
-    case 'todos':{
-      const incoming=evt.todos||[];
-      _liveTodos=incoming.map((t,i)=>{
-        const existing=_liveTodos[i];
-        return existing?{...t,status:t.status||existing.status}:t;
+function _handleAgentEvent(evt, question) {
+  switch (evt.type) {
+    case 'todos': {
+      const incoming = evt.todos || [];
+      _liveTodos = incoming.map((t, i) => {
+        const existing = _liveTodos[i];
+        return existing ? { ...t, status: t.status || existing.status } : t;
       });
-      _updatePanelTitle('Planning…');_renderLivePanel();break;
+      _updatePanelTitle('Planning…');
+      _renderLivePanel();
+      break;
     }
-    case 'searching':{
+ 
+    case 'searching': {
       _updatePanelTitle('Searching documents…');
-      _searchItems.push({query:evt.query,done:false});
-      _renderLivePanel();break;
+      // Each search item tracks its query so retrieved can match precisely
+      _searchItems.push({ query: evt.query, done: false });
+      _renderLivePanel();
+      break;
     }
-    case 'retrieved':{
-      const last=[..._searchItems].reverse().find(s=>!s.done);if(last)last.done=true;
-      _updatePanelTitle('Generating answer…');_renderLivePanel();break;
+ 
+    case 'retrieved': {
+      // FIX: match by query string instead of "last pending item".
+      // When two searches are in-flight the old approach marked whichever
+      // item happened to be last-pending, leaving the first stuck spinning.
+      const match = _searchItems.find(s => !s.done && s.query === evt.query);
+      if (match) {
+        match.done = true;
+      } else {
+        // Fallback: if query isn't found (shouldn't happen), mark oldest pending
+        const fallback = _searchItems.find(s => !s.done);
+        if (fallback) fallback.done = true;
+      }
+      _updatePanelTitle('Generating answer…');
+      _renderLivePanel();
+      break;
     }
-    case 'answer':{_finalizeLivePanel(evt.answer||'',evt.sources||[]);break;}
-    case 'error':{
-      if(_livePanelEl){_livePanelEl.remove();_livePanelEl=null;}
-      addMessage('ai',`⚠ ${evt.message||'Unknown error'}`,[]);break;
+ 
+    case 'answer': {
+      _finalizeLivePanel(evt.answer || '', evt.sources || []);
+      break;
+    }
+ 
+    case 'error': {
+      if (_livePanelEl) { _livePanelEl.remove(); _livePanelEl = null; }
+      addMessage('ai', `⚠ ${evt.message || 'Unknown error'}`, []);
+      break;
     }
   }
 }

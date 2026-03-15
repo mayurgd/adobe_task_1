@@ -36,7 +36,7 @@ async def stream_agent_turn(
 
         {"type": "todos",      "todos": [...]}
         {"type": "searching",  "query": "..."}
-        {"type": "retrieved"}
+        {"type": "retrieved",  "query": "..."}   ← query echoed back for UI matching
         {"type": "answer",     "answer": "...", "sources": [...]}
         {"type": "error",      "message": "..."}
 
@@ -53,7 +53,9 @@ async def stream_agent_turn(
         The agent's complete reply string (empty string if no reply was found
         in the event stream).
     """
-    active_retrieval_runs: set[str] = set()
+    # Maps run_id → query string so on_tool_end can echo the right query back
+    _active_queries: dict[str, str] = {}
+
     final_reply: str = ""
 
     async for event in agent.astream_events({"messages": conversation}, version="v2"):
@@ -72,8 +74,9 @@ async def stream_agent_turn(
 
         # ── Document retrieval start ──────────────────────────────────────────
         elif kind == "on_tool_start" and name == "answer_from_documents":
-            active_retrieval_runs.add(run_id)
             query_str = _extract_query(data)
+            # Store so the paired on_tool_end can echo it back
+            _active_queries[run_id] = query_str
             if event_queue:
                 await event_queue.put({"type": "searching", "query": query_str})
             else:
@@ -81,9 +84,13 @@ async def stream_agent_turn(
 
         # ── Document retrieval end ────────────────────────────────────────────
         elif kind == "on_tool_end" and name == "answer_from_documents":
-            active_retrieval_runs.discard(run_id)
+            # Echo the same query string so the frontend can match by query,
+            # not by insertion order — fixes the "first item stays spinning"
+            # bug that occurs when the second search starts before the first
+            # retrieved event arrives.
+            query_str = _active_queries.pop(run_id, "")
             if event_queue:
-                await event_queue.put({"type": "retrieved"})
+                await event_queue.put({"type": "retrieved", "query": query_str})
             else:
                 print("[Retrieval complete]", flush=True)
 
