@@ -13,7 +13,18 @@ uv pip install -U "mineru[all]"
 mineru -p /Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/inputs/annual_reports/adbe-2023-annual-report.pdf -o /Users/mayurgd/Documents/CodingSpace/adobe_task_1/data/outputs/annual_reports -b pipeline
 
 pip install sentence_transformers faiss-cpu lxml
+# Core agent stack
+deepagents
+langchain-openai
 
+# Observability
+langfuse
 
-# sample question
-What is our current revenue trend and were there key risks highlighted in the last quarter?
+# Env loading
+python-dotenv
+
+# Document indexing (index_documents.py)
+chromadb
+sentence-transformers
+pandas
+lxml
